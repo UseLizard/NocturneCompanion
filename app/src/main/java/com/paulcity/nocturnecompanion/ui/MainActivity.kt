@@ -35,7 +35,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
 import com.google.gson.JsonParser
-import com.paulcity.nocturnecompanion.services.NocturneService
+import com.paulcity.nocturnecompanion.services.NocturneServiceBLE
 import com.paulcity.nocturnecompanion.ui.theme.NocturneCompanionTheme
 
 sealed class ArtworkResult {
@@ -59,10 +59,13 @@ class MainActivity : ComponentActivity() {
 
    private val startServicePermissionLauncher =
        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-           if (permissions.getOrDefault(Manifest.permission.BLUETOOTH_CONNECT, false)) {
+           val hasConnect = permissions.getOrDefault(Manifest.permission.BLUETOOTH_CONNECT, false)
+           val hasAdvertise = permissions.getOrDefault(Manifest.permission.BLUETOOTH_ADVERTISE, false)
+           
+           if (hasConnect && hasAdvertise) {
                startNocturneService()
            } else {
-               Log.w("MainActivity", "Bluetooth connect permission was denied.")
+               Log.w("MainActivity", "Required Bluetooth permissions were denied. Connect: $hasConnect, Advertise: $hasAdvertise")
            }
        }
    
@@ -77,25 +80,25 @@ class MainActivity : ComponentActivity() {
        override fun onReceive(context: Context?, intent: Intent?) {
            Log.d("MainActivity", "BroadcastReceiver.onReceive called with action: ${intent?.action}")
            when (intent?.action) {
-               NocturneService.ACTION_COMMAND_RECEIVED -> {
-                   val commandData = intent.getStringExtra(NocturneService.EXTRA_JSON_DATA) ?: "Error reading command"
+               NocturneServiceBLE.ACTION_COMMAND_RECEIVED -> {
+                   val commandData = intent.getStringExtra(NocturneServiceBLE.EXTRA_JSON_DATA) ?: "Error reading command"
                    Log.d("MainActivity", "Command received: $commandData")
                    lastCommand.value = commandData
                }
-               NocturneService.ACTION_STATE_UPDATED -> {
-                   val stateData = intent.getStringExtra(NocturneService.EXTRA_JSON_DATA) ?: "Error reading state"
+               NocturneServiceBLE.ACTION_STATE_UPDATED -> {
+                   val stateData = intent.getStringExtra(NocturneServiceBLE.EXTRA_JSON_DATA) ?: "Error reading state"
                    Log.d("MainActivity", "State update received: $stateData")
                    lastStateUpdate.value = stateData
                }
-               NocturneService.ACTION_SERVER_STATUS -> {
-                   val status = intent.getStringExtra(NocturneService.EXTRA_SERVER_STATUS) ?: "Unknown"
-                   val running = intent.getBooleanExtra(NocturneService.EXTRA_IS_RUNNING, false)
+               NocturneServiceBLE.ACTION_SERVER_STATUS -> {
+                   val status = intent.getStringExtra(NocturneServiceBLE.EXTRA_SERVER_STATUS) ?: "Unknown"
+                   val running = intent.getBooleanExtra(NocturneServiceBLE.EXTRA_IS_RUNNING, false)
                    Log.d("MainActivity", "Server status broadcast received: $status, Running: $running")
                    serverStatus.value = status
                    isServerRunning.value = running
                }
-               NocturneService.ACTION_NOTIFICATION -> {
-                   val message = intent.getStringExtra(NocturneService.EXTRA_NOTIFICATION_MESSAGE) ?: "Unknown notification"
+               NocturneServiceBLE.ACTION_NOTIFICATION -> {
+                   val message = intent.getStringExtra(NocturneServiceBLE.EXTRA_NOTIFICATION_MESSAGE) ?: "Unknown notification"
                    val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
                    val formattedMessage = "[$timestamp] $message"
                    Log.d("MainActivity", "Notification broadcast received: $message")
@@ -133,10 +136,10 @@ class MainActivity : ComponentActivity() {
 
            // --- NEW ---
            val filter = IntentFilter().apply {
-               addAction(NocturneService.ACTION_COMMAND_RECEIVED)
-               addAction(NocturneService.ACTION_STATE_UPDATED)
-               addAction(NocturneService.ACTION_SERVER_STATUS)
-               addAction(NocturneService.ACTION_NOTIFICATION)
+               addAction(NocturneServiceBLE.ACTION_COMMAND_RECEIVED)
+               addAction(NocturneServiceBLE.ACTION_STATE_UPDATED)
+               addAction(NocturneServiceBLE.ACTION_SERVER_STATUS)
+               addAction(NocturneServiceBLE.ACTION_NOTIFICATION)
            }
            
            // Use LocalBroadcastManager for more reliable delivery on Android 14+
@@ -218,6 +221,7 @@ class MainActivity : ComponentActivity() {
            arrayOf(
                Manifest.permission.BLUETOOTH_SCAN,
                Manifest.permission.BLUETOOTH_CONNECT,
+               Manifest.permission.BLUETOOTH_ADVERTISE,
                Manifest.permission.ACCESS_FINE_LOCATION,
                Manifest.permission.POST_NOTIFICATIONS
            )
@@ -233,10 +237,13 @@ class MainActivity : ComponentActivity() {
 
    private fun requestBluetoothConnectPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            Log.d("MainActivity", "Requesting BLUETOOTH_CONNECT permission for API ${Build.VERSION.SDK_INT}")
-            startServicePermissionLauncher.launch(arrayOf(Manifest.permission.BLUETOOTH_CONNECT))
+            Log.d("MainActivity", "Requesting Bluetooth permissions for API ${Build.VERSION.SDK_INT}")
+            startServicePermissionLauncher.launch(arrayOf(
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE
+            ))
         } else {
-            Log.d("MainActivity", "No BLUETOOTH_CONNECT permission needed for API ${Build.VERSION.SDK_INT}")
+            Log.d("MainActivity", "No special Bluetooth permissions needed for API ${Build.VERSION.SDK_INT}")
             startNocturneService() // No special permission needed for older versions
         }
     }
@@ -255,10 +262,10 @@ class MainActivity : ComponentActivity() {
    }
 
    private fun startNocturneService() {
-       Log.d("MainActivity", "Starting NocturneService on Android API ${Build.VERSION.SDK_INT}...")
+       Log.d("MainActivity", "Starting NocturneServiceBLE on Android API ${Build.VERSION.SDK_INT}...")
        try {
-           val intent = Intent(this, NocturneService::class.java).apply {
-               action = NocturneService.ACTION_START
+           val intent = Intent(this, NocturneServiceBLE::class.java).apply {
+               action = NocturneServiceBLE.ACTION_START
            }
            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                startForegroundService(intent)
@@ -273,34 +280,26 @@ class MainActivity : ComponentActivity() {
                testBroadcastSystem()
            }, 2000)
        } catch (e: Exception) {
-           Log.e("MainActivity", "Failed to start NocturneService", e)
+           Log.e("MainActivity", "Failed to start NocturneServiceBLE", e)
        }
    }
 
    private fun stopNocturneService() {
-       Log.d("MainActivity", "Stopping NocturneService...")
+       Log.d("MainActivity", "Stopping NocturneServiceBLE...")
        try {
-           val intent = Intent(this, NocturneService::class.java).apply {
-               action = NocturneService.ACTION_STOP
+           val intent = Intent(this, NocturneServiceBLE::class.java).apply {
+               action = NocturneServiceBLE.ACTION_STOP
            }
            startService(intent)
            Log.d("MainActivity", "Service stop requested")
        } catch (e: Exception) {
-           Log.e("MainActivity", "Failed to stop NocturneService", e)
+           Log.e("MainActivity", "Failed to stop NocturneServiceBLE", e)
        }
    }
    
    private fun uploadAlbumArt() {
-       Log.d("MainActivity", "Requesting manual album art upload...")
-       try {
-           val intent = Intent(this, NocturneService::class.java).apply {
-               action = NocturneService.ACTION_UPLOAD_ALBUM_ART
-           }
-           startService(intent)
-           Log.d("MainActivity", "Album art upload requested")
-       } catch (e: Exception) {
-           Log.e("MainActivity", "Failed to request album art upload", e)
-       }
+       Log.d("MainActivity", "Album art upload not supported in BLE version")
+       // Album art upload removed in BLE-only implementation
    }
 }
 
@@ -447,7 +446,7 @@ fun ServerStatusPanel(
            horizontalAlignment = Alignment.CenterHorizontally
        ) {
            Text(
-               "SPP Server Status",
+               "BLE Server Status",
                style = MaterialTheme.typography.titleMedium
            )
            
@@ -466,14 +465,14 @@ fun ServerStatusPanel(
                        containerColor = MaterialTheme.colorScheme.error
                    )
                ) {
-                   Text("Stop SPP Server")
+                   Text("Stop BLE Server")
                }
            } else {
                Button(
                    onClick = onStartServer,
                    modifier = Modifier.fillMaxWidth()
                ) {
-                   Text("Start SPP Server")
+                   Text("Start BLE Server")
                }
            }
        }

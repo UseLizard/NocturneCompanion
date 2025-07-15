@@ -32,7 +32,11 @@ class AlbumArtManager(private val context: Context) {
     /**
      * Extract album art from MediaMetadata and prepare for Bluetooth transmission
      */
-    suspend fun processAlbumArt(metadata: MediaMetadata?, bluetoothManager: BluetoothServerManager? = null): String? {
+    suspend fun processAlbumArt(
+        metadata: MediaMetadata?, 
+        bluetoothManager: BluetoothServerManager? = null,
+        bleManager: BleServerManager? = null
+    ): String? {
         return withContext(Dispatchers.IO) {
             try {
                 val artwork = metadata?.getBitmap(MediaMetadata.METADATA_KEY_ART)
@@ -60,9 +64,13 @@ class AlbumArtManager(private val context: Context) {
                     saveBitmapToFile(processedBitmap, cacheFile)
                 }
                 
-                // Send via Bluetooth if manager is provided
+                // Send via available protocols
                 bluetoothManager?.let { btManager ->
-                    sendAlbumArtViaBluetooth(btManager, hash, imageBytes)
+                    sendAlbumArtViaSPP(btManager, hash, imageBytes)
+                }
+                
+                bleManager?.let { bleManager ->
+                    sendAlbumArtViaBLE(bleManager, hash, imageBytes)
                 }
                 
                 return@withContext hash
@@ -77,7 +85,11 @@ class AlbumArtManager(private val context: Context) {
     /**
      * Manually upload album art with a button press
      */
-    suspend fun uploadCurrentAlbumArt(metadata: MediaMetadata?, bluetoothManager: BluetoothServerManager?): Boolean {
+    suspend fun uploadCurrentAlbumArt(
+        metadata: MediaMetadata?, 
+        bluetoothManager: BluetoothServerManager? = null,
+        bleManager: BleServerManager? = null
+    ): Boolean {
         return withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Manual upload requested")
@@ -87,12 +99,12 @@ class AlbumArtManager(private val context: Context) {
                     return@withContext false
                 }
                 
-                if (bluetoothManager == null) {
-                    Log.w(TAG, "No Bluetooth manager available")
+                if (bluetoothManager == null && bleManager == null) {
+                    Log.w(TAG, "No connection managers available")
                     return@withContext false
                 }
                 
-                val result = processAlbumArt(metadata, bluetoothManager)
+                val result = processAlbumArt(metadata, bluetoothManager, bleManager)
                 val success = result != null
                 Log.d(TAG, "Manual upload result: $success")
                 return@withContext success
@@ -143,7 +155,7 @@ class AlbumArtManager(private val context: Context) {
         }
     }
     
-    private suspend fun sendAlbumArtViaBluetooth(bluetoothManager: BluetoothServerManager, hash: String, imageBytes: ByteArray) {
+    private suspend fun sendAlbumArtViaSPP(bluetoothManager: BluetoothServerManager, hash: String, imageBytes: ByteArray) {
         try {
             Log.d(TAG, "Sending album art via Bluetooth: hash=$hash, size=${imageBytes.size} bytes")
             
@@ -191,7 +203,73 @@ class AlbumArtManager(private val context: Context) {
             Log.d(TAG, "All ${totalChunks} chunks sent successfully")
             
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to send album art via Bluetooth", e)
+            Log.e(TAG, "Failed to send album art via SPP", e)
+            throw e
+        }
+    }
+    
+    // New BLE implementation with MTU-aware chunking
+    private suspend fun sendAlbumArtViaBLE(bleManager: BleServerManager, hash: String, imageBytes: ByteArray) {
+        try {
+            Log.d(TAG, "Sending album art via BLE: hash=$hash, size=${imageBytes.size} bytes")
+            
+            // Get negotiated MTU and calculate optimal chunk size
+            val negotiatedMtu = bleManager.getNegotiatedMtu()
+            val effectiveDataSize = negotiatedMtu - 3 // Account for BLE headers
+            
+            // Use smaller chunk size for BLE to fit in MTU
+            val bleChunkSize = minOf(effectiveDataSize, 512) // Cap at 512 bytes
+            
+            Log.d(TAG, "BLE MTU: $negotiatedMtu, effective data size: $effectiveDataSize, chunk size: $bleChunkSize")
+            
+            // Convert to base64 once
+            val base64Data = android.util.Base64.encodeToString(imageBytes, android.util.Base64.DEFAULT)
+            val totalSize = base64Data.length
+            val totalChunks = (totalSize + bleChunkSize - 1) / bleChunkSize
+            
+            Log.d(TAG, "Chunking album art for BLE: ${totalChunks} chunks of max ${bleChunkSize} bytes each")
+            
+            // Send chunks with flow control (no fixed delays)
+            for (chunkIndex in 0 until totalChunks) {
+                val startIndex = chunkIndex * bleChunkSize
+                val endIndex = minOf(startIndex + bleChunkSize, totalSize)
+                val chunkData = base64Data.substring(startIndex, endIndex)
+                
+                val albumArtCommand = mapOf(
+                    "command" to "album_art",
+                    "hash" to hash,
+                    "size" to imageBytes.size,
+                    "chunk_index" to chunkIndex,
+                    "total_chunks" to totalChunks,
+                    "chunk_size" to chunkData.length,
+                    "data" to chunkData,
+                    "protocol" to "ble" // Identify as BLE transfer
+                )
+                
+                val gson = com.google.gson.Gson()
+                val jsonCommand = gson.toJson(albumArtCommand)
+                
+                Log.d(TAG, "Sending BLE chunk ${chunkIndex + 1}/${totalChunks} (${jsonCommand.toByteArray().size} bytes)")
+                
+                try {
+                    // Send via BLE response characteristic
+                    bleManager.sendResponse(jsonCommand)
+                    
+                    // Small delay to prevent overwhelming the BLE stack
+                    if (chunkIndex < totalChunks - 1) {
+                        kotlinx.coroutines.delay(50) // Shorter delay than SPP
+                    }
+                    
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to send BLE chunk ${chunkIndex + 1}/${totalChunks}: ${e.message}")
+                    throw Exception("Failed at BLE chunk ${chunkIndex + 1}/${totalChunks}: ${e.message}")
+                }
+            }
+            
+            Log.d(TAG, "All ${totalChunks} BLE chunks sent successfully")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send album art via BLE", e)
             throw e
         }
     }

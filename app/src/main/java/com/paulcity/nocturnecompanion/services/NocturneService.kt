@@ -27,6 +27,7 @@ class NocturneService : Service() {
 
    private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
    private lateinit var bluetoothServerManager: BluetoothServerManager
+   private lateinit var bleServerManager: BleServerManager
    private lateinit var audioManager: AudioManager
    private lateinit var albumArtManager: AlbumArtManager
    private val gson = Gson()
@@ -45,7 +46,7 @@ class NocturneService : Service() {
            // Process album art in background
            serviceScope.launch {
                try {
-                   albumArtManager.processAlbumArt(metadata, bluetoothServerManager)
+                   albumArtManager.processAlbumArt(metadata, bluetoothServerManager, bleServerManager)
                } catch (e: Exception) {
                    Log.w("NocturneService", "Failed to process album art", e)
                }
@@ -120,11 +121,11 @@ class NocturneService : Service() {
        try {
            when (intent?.action) {
                ACTION_START -> {
-                   Log.d("NocturneService", "Starting service and SPP server")
-                   broadcastNotification("Starting SPP server and media monitoring...")
+                   Log.d("NocturneService", "Starting service with dual protocol support (BLE + SPP)")
+                   broadcastNotification("Starting BLE and SPP servers...")
                    
-                   initBluetooth()
-                   Log.d("NocturneService", "Bluetooth initialized")
+                   initDualProtocolBluetooth()
+                   Log.d("NocturneService", "Dual protocol Bluetooth initialized")
                    
                    observeMediaControllers()
                    Log.d("NocturneService", "Media controllers observer started")
@@ -132,7 +133,7 @@ class NocturneService : Service() {
                    observeBluetoothStatus()
                    Log.d("NocturneService", "Bluetooth status observer started")
                    
-                   broadcastNotification("SPP server startup complete")
+                   broadcastNotification("Dual protocol server startup complete")
                }
                ACTION_STOP -> {
                    Log.d("NocturneService", "Stopping service.")
@@ -157,7 +158,7 @@ class NocturneService : Service() {
                            Log.d("NocturneService", "Attempting upload for: ${metadata.getString(MediaMetadata.METADATA_KEY_TITLE)}")
                            broadcastNotification("Uploading album art...")
                            
-                           val success = albumArtManager.uploadCurrentAlbumArt(metadata, bluetoothServerManager)
+                           val success = albumArtManager.uploadCurrentAlbumArt(metadata, bluetoothServerManager, bleServerManager)
                            val message = if (success) {
                                "Album art uploaded successfully"
                            } else {
@@ -182,26 +183,31 @@ class NocturneService : Service() {
        return START_STICKY
    }
 
-   private fun initBluetooth() {
-       Log.d("NocturneService", "Initializing Bluetooth...")
+   private fun initDualProtocolBluetooth() {
+       Log.d("NocturneService", "Initializing dual protocol Bluetooth (BLE + SPP)...")
        try {
-           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-               broadcastNotification("Error: Bluetooth Connect permission not granted.")
-               Log.e("NocturneService", "BLUETOOTH_CONNECT permission not granted.")
-               stopSelf()
-               return
+           // Check required permissions
+           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+               val hasConnect = checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+               val hasAdvertise = checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED
+               
+               if (!hasConnect || !hasAdvertise) {
+                   broadcastNotification("Error: Missing Bluetooth permissions (Connect: $hasConnect, Advertise: $hasAdvertise)")
+                   Log.e("NocturneService", "Missing Bluetooth permissions - Connect: $hasConnect, Advertise: $hasAdvertise")
+                   stopSelf()
+                   return
+               }
            }
 
-           bluetoothServerManager = BluetoothServerManager(this) { receivedJson ->
+           // Shared command handler for both protocols
+           val commandHandler = { receivedJson: String ->
                if (testingMode) showDataReceivedNotification(receivedJson)
                try {
-                   // --- MODIFIED ---
                    // Broadcast the raw command JSON
                    val commandIntent = Intent(ACTION_COMMAND_RECEIVED)
                    commandIntent.putExtra(EXTRA_JSON_DATA, receivedJson)
                    sendBroadcastCompat(commandIntent)
                    Log.d("NocturneService", "Command broadcast sent: $receivedJson")
-                   // --- END MODIFIED ---
                    
                    val command = gson.fromJson(receivedJson, Command::class.java)
                    handleCommand(command)
@@ -210,12 +216,23 @@ class NocturneService : Service() {
                    if (testingMode) showParseErrorNotification(receivedJson, e.message ?: "Unknown error")
                }
            }
+
+           // Initialize BLE Server (preferred protocol)
+           bleServerManager = BleServerManager(this, commandHandler)
+           Log.d("NocturneService", "BleServerManager created")
+           bleServerManager.startServer()
+           Log.d("NocturneService", "BLE server start requested")
+
+           // Initialize SPP Server (backward compatibility)
+           bluetoothServerManager = BluetoothServerManager(this, commandHandler)
            Log.d("NocturneService", "BluetoothServerManager created")
-           
            bluetoothServerManager.startServer()
-           Log.d("NocturneService", "Bluetooth server start requested")
+           Log.d("NocturneService", "SPP server start requested")
+           
+           broadcastNotification("Both BLE and SPP servers started")
+           
        } catch (e: Exception) {
-           Log.e("NocturneService", "Failed to initialize Bluetooth", e)
+           Log.e("NocturneService", "Failed to initialize dual protocol Bluetooth", e)
            throw e
        }
    }
@@ -336,17 +353,34 @@ class NocturneService : Service() {
        serviceScope.launch(Dispatchers.IO) {
            val jsonState = gson.toJson(lastState)
            
-           // --- MODIFIED ---
            // Broadcast the state update JSON
            val stateIntent = Intent(ACTION_STATE_UPDATED)
            stateIntent.putExtra(EXTRA_JSON_DATA, jsonState)
            sendBroadcastCompat(stateIntent)
            Log.d("NocturneService", "State update broadcast sent: $jsonState")
-           // --- END MODIFIED ---
            
-           val dataWithNewline = jsonState + "\n"
-           bluetoothServerManager.sendData(dataWithNewline)
-           Log.d("NocturneService", "Sent update: $jsonState")
+           // Send via both protocols
+           try {
+               // BLE (preferred protocol) - no newline needed
+               if (::bleServerManager.isInitialized && bleServerManager.isConnected()) {
+                   bleServerManager.sendResponse(jsonState)
+                   Log.d("NocturneService", "Sent BLE update: $jsonState")
+               }
+               
+               // SPP (backward compatibility) - needs newline
+               if (::bluetoothServerManager.isInitialized && bluetoothServerManager.isConnected()) {
+                   val dataWithNewline = jsonState + "\n"
+                   bluetoothServerManager.sendData(dataWithNewline)
+                   Log.d("NocturneService", "Sent SPP update: $jsonState")
+               }
+               
+               if (!::bleServerManager.isInitialized && !::bluetoothServerManager.isInitialized) {
+                   Log.w("NocturneService", "No protocol managers initialized")
+               }
+               
+           } catch (e: Exception) {
+               Log.e("NocturneService", "Error sending state update", e)
+           }
        }
    }
 
@@ -477,17 +511,25 @@ class NocturneService : Service() {
    override fun onDestroy() {
        super.onDestroy()
        
-       // Broadcast that server is stopping
-       broadcastNotification("Service shutting down - SPP server stopped")
+       // Broadcast that servers are stopping
+       broadcastNotification("Service shutting down - BLE and SPP servers stopped")
        val statusIntent = Intent(ACTION_SERVER_STATUS)
        statusIntent.putExtra(EXTRA_SERVER_STATUS, "Disconnected")
        statusIntent.putExtra(EXTRA_IS_RUNNING, false)
        sendBroadcastCompat(statusIntent)
        
        serviceScope.cancel()
+       
+       // Stop both protocol servers
+       if (::bleServerManager.isInitialized) {
+           bleServerManager.stopServer()
+           Log.d("NocturneService", "BLE server stopped")
+       }
        if (::bluetoothServerManager.isInitialized) {
            bluetoothServerManager.stopServer()
+           Log.d("NocturneService", "SPP server stopped")
        }
+       
        currentMediaController?.unregisterCallback(mediaCallback)
        Log.i("NocturneService", "Service destroyed.")
    }
