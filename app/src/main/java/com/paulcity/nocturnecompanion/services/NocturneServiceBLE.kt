@@ -24,6 +24,9 @@ import com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager
 import com.paulcity.nocturnecompanion.ble.DebugLogger
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
+import java.util.TimeZone
+import android.os.Handler
+import android.os.Looper
 
 class NocturneServiceBLE : Service() {
 
@@ -33,6 +36,19 @@ class NocturneServiceBLE : Service() {
     private val gson = Gson()
     
     private val debugMode = true // Enhanced debug mode
+    
+    // Time sync handler for periodic updates (optional)
+    private val timeSyncHandler = Handler(Looper.getMainLooper())
+    private val timeSyncRunnable = object : Runnable {
+        override fun run() {
+            if (bleServerManager.connectedDevicesList.value.isNotEmpty()) {
+                Log.d(TAG, "Periodic time sync")
+                sendTimeSync()
+            }
+            // Schedule next sync in 1 hour
+            timeSyncHandler.postDelayed(this, 3600000)
+        }
+    }
     
     private var currentMediaController: MediaController? = null
     private val mediaCallback = object : MediaController.Callback() {
@@ -113,6 +129,10 @@ class NocturneServiceBLE : Service() {
             startForeground(NOTIFICATION_ID, createNotification("Initializing BLE..."))
             Log.d(TAG, "Started foreground service")
             
+            // Start periodic time sync (every hour)
+            timeSyncHandler.postDelayed(timeSyncRunnable, 3600000)
+            Log.d(TAG, "Scheduled periodic time sync")
+            
         } catch (e: Exception) {
             Log.e(TAG, "Error in onCreate()", e)
             throw e
@@ -183,7 +203,15 @@ class NocturneServiceBLE : Service() {
         }
 
         // Initialize BLE server
-        bleServerManager = EnhancedBleServerManager(this, commandHandler)
+        bleServerManager = EnhancedBleServerManager(
+            this, 
+            commandHandler,
+            onDeviceConnected = { device ->
+                // Send time sync when device connects
+                Log.d(TAG, "Device connected, sending time sync")
+                sendTimeSync()
+            }
+        )
         bleServerManager.startServer()
         
         Log.d(TAG, "BLE server initialized")
@@ -341,6 +369,25 @@ class NocturneServiceBLE : Service() {
             }
         }
     }
+    
+    private fun sendTimeSync() {
+        serviceScope.launch {
+            try {
+                val timeSync = mapOf(
+                    "type" to "timeSync",
+                    "timestamp_ms" to System.currentTimeMillis(),
+                    "timezone" to TimeZone.getDefault().id
+                )
+                
+                bleServerManager.sendStateUpdate(timeSync)
+                
+                Log.d(TAG, "Time sync sent: ${System.currentTimeMillis()} - ${TimeZone.getDefault().id}")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send time sync", e)
+            }
+        }
+    }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -411,6 +458,10 @@ class NocturneServiceBLE : Service() {
 
     override fun onDestroy() {
         Log.d(TAG, "onDestroy() called")
+        
+        // Stop periodic time sync
+        timeSyncHandler.removeCallbacks(timeSyncRunnable)
+        Log.d(TAG, "Stopped periodic time sync")
         
         serviceScope.cancel()
         currentMediaController?.unregisterCallback(mediaCallback)

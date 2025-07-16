@@ -20,7 +20,8 @@ import java.util.concurrent.atomic.AtomicInteger
 @SuppressLint("MissingPermission")
 class EnhancedBleServerManager(
     private val context: Context,
-    private val onCommandReceived: (Command) -> Unit
+    private val onCommandReceived: (Command) -> Unit,
+    private val onDeviceConnected: ((BluetoothDevice) -> Unit)? = null
 ) {
     companion object {
         private const val TAG = "EnhancedBleServer"
@@ -296,6 +297,10 @@ class EnhancedBleServerManager(
         CoroutineScope(Dispatchers.IO).launch {
             delay(100) // Small delay to ensure connection is stable
             sendCapabilities(device)
+            
+            // Notify connection callback after capabilities
+            delay(100)
+            onDeviceConnected?.invoke(device)
         }
     }
     
@@ -420,6 +425,25 @@ class EnhancedBleServerManager(
             mapOf(
                 "is_playing" to stateUpdate.is_playing,
                 "track" to (stateUpdate.track ?: "Unknown")
+            )
+        )
+        
+        connectedDevices.values.forEach { context ->
+            if (context.subscriptions.contains(BleConstants.STATE_TX_CHAR_UUID.toString())) {
+                sendNotification(context.device, BleConstants.STATE_TX_CHAR_UUID, json)
+            }
+        }
+    }
+    
+    fun sendStateUpdate(data: Map<String, Any>) {
+        val json = gson.toJson(data)
+        
+        debugLogger.debug(
+            DebugLogger.LogType.STATE_UPDATED,
+            "Sending custom state update",
+            mapOf(
+                "type" to (data["type"] ?: "unknown"),
+                "size" to json.length
             )
         )
         

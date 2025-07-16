@@ -109,5 +109,6 @@ class DebugLogger {
         const val MEDIA_SESSION = "MEDIA_SESSION"
         const val PERMISSION = "PERMISSION"
         const val INITIALIZATION = "INITIALIZATION"
+        const val TIME_SYNC = "TIME_SYNC"
     }
 }
