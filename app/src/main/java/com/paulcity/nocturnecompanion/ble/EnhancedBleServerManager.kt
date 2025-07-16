@@ -39,6 +39,10 @@ class EnhancedBleServerManager(
     private val connectedDevices = ConcurrentHashMap<String, DeviceContext>()
     private val commandIdCounter = AtomicInteger(0)
     
+    // Album art transfer management
+    private val albumArtTransferJobs = ConcurrentHashMap<String, Job>()
+    private val albumArtManager = AlbumArtManager()
+    
     // State flows
     private val _connectionStatus = MutableStateFlow("Not Initialized")
     val connectionStatus = _connectionStatus.asStateFlow()
@@ -93,6 +97,20 @@ class EnhancedBleServerManager(
         ),
         val mtu: Int = BleConstants.TARGET_MTU,
         val debug_enabled: Boolean = true
+    )
+    
+    data class AlbumArtStart(
+        val type: String = BleConstants.MessageType.ALBUM_ART_START,
+        val size: Int,
+        val track_id: String,
+        val checksum: String
+    )
+    
+    data class AlbumArtEnd(
+        val type: String = BleConstants.MessageType.ALBUM_ART_END,
+        val track_id: String,
+        val checksum: String,
+        val total_chunks: Int
     )
     
     init {
@@ -252,6 +270,10 @@ class EnhancedBleServerManager(
             BluetoothGattCharacteristic.PERMISSION_READ
         )
         service.addCharacteristic(infoChar)
+        
+        // Album Art TX Characteristic
+        val albumArtChar = createNotifyCharacteristic(BleConstants.ALBUM_ART_TX_CHAR_UUID)
+        service.addCharacteristic(albumArtChar)
         
         // Open GATT Server
         gattServer = bluetoothManager.openGattServer(context, gattServerCallback)
@@ -580,6 +602,7 @@ class EnhancedBleServerManager(
                     when (uuid) {
                         BleConstants.STATE_TX_CHAR_UUID.toString() -> "State Updates"
                         BleConstants.DEBUG_LOG_CHAR_UUID.toString() -> "Debug Logs"
+                        BleConstants.ALBUM_ART_TX_CHAR_UUID.toString() -> "Album Art"
                         else -> uuid
                     }
                 },
@@ -589,8 +612,155 @@ class EnhancedBleServerManager(
         _connectedDevicesList.value = devices
     }
     
+    fun sendAlbumArtFromMetadata(metadata: android.media.MediaMetadata?, trackId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            albumArtManager.extractAlbumArt(metadata)?.let { (artData, checksum) ->
+                sendAlbumArt(artData, checksum, trackId)
+            } ?: run {
+                debugLogger.info(
+                    DebugLogger.LogType.NOTIFICATION_SENT,
+                    "No album art available for track",
+                    mapOf("track_id" to trackId)
+                )
+            }
+        }
+    }
+    
+    fun sendAlbumArt(albumArtData: ByteArray, checksum: String, trackId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            // Cancel any existing transfer for this device
+            albumArtTransferJobs.values.forEach { it.cancel() }
+            albumArtTransferJobs.clear()
+            
+            // Send to all connected devices that have subscribed to album art
+            connectedDevices.values.forEach { context ->
+                if (context.subscriptions.contains(BleConstants.ALBUM_ART_TX_CHAR_UUID.toString())) {
+                    val job = launch {
+                        sendAlbumArtToDevice(context.device, albumArtData, checksum, trackId)
+                    }
+                    albumArtTransferJobs[context.device.address] = job
+                }
+            }
+        }
+    }
+    
+    private suspend fun sendAlbumArtToDevice(device: BluetoothDevice, data: ByteArray, checksum: String, trackId: String) {
+        try {
+            val mtu = connectedDevices[device.address]?.mtu ?: BleConstants.DEFAULT_MTU
+            val chunkSize = minOf(BleConstants.ALBUM_ART_CHUNK_SIZE, mtu - BleConstants.MTU_HEADER_SIZE)
+            val totalChunks = (data.size + chunkSize - 1) / chunkSize
+            
+            debugLogger.info(
+                DebugLogger.LogType.NOTIFICATION_SENT,
+                "Starting album art transfer",
+                mapOf(
+                    "device" to device.address,
+                    "size" to data.size,
+                    "chunks" to totalChunks,
+                    "chunk_size" to chunkSize,
+                    "track_id" to trackId
+                )
+            )
+            
+            // Send start message
+            val startMsg = AlbumArtStart(
+                size = data.size,
+                track_id = trackId,
+                checksum = checksum
+            )
+            sendNotification(device, BleConstants.STATE_TX_CHAR_UUID, gson.toJson(startMsg))
+            
+            // Small delay to ensure start message is processed
+            delay(50)
+            
+            // Send chunks
+            var offset = 0
+            var chunkIndex = 0
+            
+            while (offset < data.size && coroutineContext.isActive) {
+                val remainingBytes = data.size - offset
+                val currentChunkSize = minOf(chunkSize, remainingBytes)
+                val chunk = data.sliceArray(offset until offset + currentChunkSize)
+                
+                // Send raw bytes on album art characteristic
+                sendRawNotification(device, BleConstants.ALBUM_ART_TX_CHAR_UUID, chunk)
+                
+                debugLogger.verbose(
+                    DebugLogger.LogType.NOTIFICATION_SENT,
+                    "Sent album art chunk",
+                    mapOf(
+                        "chunk" to chunkIndex,
+                        "size" to currentChunkSize,
+                        "offset" to offset
+                    )
+                )
+                
+                offset += currentChunkSize
+                chunkIndex++
+                
+                // Small delay between chunks to avoid overwhelming the receiver
+                delay(20)
+            }
+            
+            // Send end message
+            val endMsg = AlbumArtEnd(
+                track_id = trackId,
+                checksum = checksum,
+                total_chunks = chunkIndex
+            )
+            sendNotification(device, BleConstants.STATE_TX_CHAR_UUID, gson.toJson(endMsg))
+            
+            debugLogger.info(
+                DebugLogger.LogType.NOTIFICATION_SENT,
+                "Album art transfer completed",
+                mapOf(
+                    "device" to device.address,
+                    "total_chunks" to chunkIndex,
+                    "track_id" to trackId
+                )
+            )
+            
+        } catch (e: Exception) {
+            debugLogger.error(
+                DebugLogger.LogType.ERROR,
+                "Album art transfer failed",
+                mapOf(
+                    "device" to device.address,
+                    "error" to e.message,
+                    "track_id" to trackId
+                )
+            )
+        }
+    }
+    
+    private fun sendRawNotification(device: BluetoothDevice, characteristicUuid: UUID, data: ByteArray) {
+        val service = gattServer?.getService(BleConstants.NOCTURNE_SERVICE_UUID)
+        val characteristic = service?.getCharacteristic(characteristicUuid)
+        
+        characteristic?.let { char ->
+            char.value = data
+            val success = gattServer?.notifyCharacteristicChanged(device, char, false) ?: false
+            
+            if (!success) {
+                debugLogger.warning(
+                    DebugLogger.LogType.ERROR,
+                    "Failed to send raw notification",
+                    mapOf(
+                        "device" to device.address,
+                        "characteristic" to characteristicUuid.toString(),
+                        "size" to data.size
+                    )
+                )
+            }
+        }
+    }
+    
     fun stopServer() {
         debugLogger.info(DebugLogger.LogType.INITIALIZATION, "Stopping BLE server")
+        
+        // Cancel all album art transfers
+        albumArtTransferJobs.values.forEach { it.cancel() }
+        albumArtTransferJobs.clear()
         
         stopAdvertising()
         gattServer?.close()

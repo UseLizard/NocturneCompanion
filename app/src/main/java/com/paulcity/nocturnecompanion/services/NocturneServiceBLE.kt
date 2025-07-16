@@ -51,6 +51,8 @@ class NocturneServiceBLE : Service() {
     }
     
     private var currentMediaController: MediaController? = null
+    private var lastTrackId: String? = null
+    
     private val mediaCallback = object : MediaController.Callback() {
         override fun onMetadataChanged(metadata: MediaMetadata?) {
             Log.d(TAG, "Media metadata changed for ${currentMediaController?.packageName}")
@@ -59,6 +61,16 @@ class NocturneServiceBLE : Service() {
             lastState.album = metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM)
             lastState.track = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)
             lastState.duration_ms = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0
+            
+            // Generate track ID from metadata
+            val newTrackId = "${lastState.artist}|${lastState.album}|${lastState.track}"
+            
+            // Send album art if track changed
+            if (newTrackId != lastTrackId && metadata != null) {
+                lastTrackId = newTrackId
+                Log.d(TAG, "Track changed, sending album art for: $newTrackId")
+                bleServerManager.sendAlbumArtFromMetadata(metadata, newTrackId)
+            }
             
             sendStateUpdate()
         }
@@ -334,6 +346,14 @@ class NocturneServiceBLE : Service() {
                 lastState.album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM)
                 lastState.track = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
                 lastState.duration_ms = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
+                
+                // Generate track ID and send album art if needed
+                val newTrackId = "${lastState.artist}|${lastState.album}|${lastState.track}"
+                if (newTrackId != lastTrackId) {
+                    lastTrackId = newTrackId
+                    Log.d(TAG, "Track changed during controller update, sending album art for: $newTrackId")
+                    bleServerManager.sendAlbumArtFromMetadata(metadata, newTrackId)
+                }
             }
             
             // Update playback state
