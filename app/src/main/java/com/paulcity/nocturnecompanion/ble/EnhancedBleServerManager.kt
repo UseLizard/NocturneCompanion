@@ -298,8 +298,8 @@ class EnhancedBleServerManager(
             delay(100) // Small delay to ensure connection is stable
             sendCapabilities(device)
             
-            // Notify connection callback after capabilities
-            delay(100)
+            // Wait longer to ensure client has time to subscribe to notifications
+            delay(3000) // 3 second delay to allow subscription
             onDeviceConnected?.invoke(device)
         }
     }
