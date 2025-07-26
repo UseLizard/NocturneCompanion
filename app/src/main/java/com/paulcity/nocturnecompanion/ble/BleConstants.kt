@@ -19,12 +19,16 @@ object BleConstants {
     val DEVICE_NAME_CHAR_UUID: UUID = UUID.fromString("00002A00-0000-1000-8000-00805f9b34fb")
     
     // BLE Configuration
-    const val TARGET_MTU = 512
+    const val TARGET_MTU = 517
     const val DEFAULT_MTU = 23
     const val MTU_HEADER_SIZE = 3
     const val MAX_CHARACTERISTIC_LENGTH = 512
     const val CONNECTION_TIMEOUT_MS = 10000L
     const val ADVERTISING_TIMEOUT_MS = 0L // Advertise indefinitely
+    
+    // Album Art
+    const val ALBUM_ART_TARGET_SIZE = 300 // Target size for square album art
+    const val ALBUM_ART_WEBP_QUALITY = 80 // WebP quality (0-100)
     
     // Album Art Transfer Configuration
     const val ALBUM_ART_CHUNK_SIZE = TARGET_MTU - MTU_HEADER_SIZE // 509 bytes per chunk
@@ -53,5 +57,6 @@ object BleConstants {
         const val DEBUG_LOG = "debugLog"
         const val ALBUM_ART_START = "album_art_start"
         const val ALBUM_ART_END = "album_art_end"
+        const val ALBUM_ART_QUERY = "album_art_query"
     }
 }

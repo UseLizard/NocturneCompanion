@@ -20,6 +20,7 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.gson.Gson
 import com.paulcity.nocturnecompanion.data.Command
 import com.paulcity.nocturnecompanion.data.StateUpdate
+import com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 
@@ -27,7 +28,7 @@ class NocturneService : Service() {
 
    private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
    private lateinit var bluetoothServerManager: BluetoothServerManager
-   private lateinit var bleServerManager: BleServerManager
+   private lateinit var bleServerManager: EnhancedBleServerManager
    private lateinit var audioManager: AudioManager
    private lateinit var albumArtManager: AlbumArtManager
    private val gson = Gson()
@@ -46,7 +47,9 @@ class NocturneService : Service() {
            // Process album art in background
            serviceScope.launch {
                try {
-                   albumArtManager.processAlbumArt(metadata, bluetoothServerManager, bleServerManager)
+                   // Send album art via BLE
+                   val trackId = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: "unknown"
+                   bleServerManager.sendAlbumArtFromMetadata(metadata, trackId)
                } catch (e: Exception) {
                    Log.w("NocturneService", "Failed to process album art", e)
                }
@@ -67,6 +70,9 @@ class NocturneService : Service() {
        artist = null, album = null, track = null,
        duration_ms = 0, position_ms = 0, is_playing = false, volume_percent = 0
    )
+   
+   // Track the last sent state to avoid duplicates
+   private var lastSentState: String = ""
 
    companion object {
        const val NOTIFICATION_ID = 1
@@ -133,6 +139,10 @@ class NocturneService : Service() {
                    observeBluetoothStatus()
                    Log.d("NocturneService", "Bluetooth status observer started")
                    
+                   // Start periodic state updates every second
+                   startPeriodicStateUpdates()
+                   Log.d("NocturneService", "Periodic state updates started")
+                   
                    broadcastNotification("Dual protocol server startup complete")
                }
                ACTION_STOP -> {
@@ -158,7 +168,8 @@ class NocturneService : Service() {
                            Log.d("NocturneService", "Attempting upload for: ${metadata.getString(MediaMetadata.METADATA_KEY_TITLE)}")
                            broadcastNotification("Uploading album art...")
                            
-                           val success = albumArtManager.uploadCurrentAlbumArt(metadata, bluetoothServerManager, bleServerManager)
+                           // Since we're using BLE only, we don't need the SPP upload
+                           val success = false // albumArtManager.uploadCurrentAlbumArt(metadata, bluetoothServerManager, null)
                            val message = if (success) {
                                "Album art uploaded successfully"
                            } else {
@@ -218,8 +229,22 @@ class NocturneService : Service() {
            }
 
            // Initialize BLE Server (preferred protocol)
-           bleServerManager = BleServerManager(this, commandHandler)
-           Log.d("NocturneService", "BleServerManager created")
+           // EnhancedBleServerManager handles its own JSON parsing, so we need a Command handler
+           val bleCommandHandler = { command: Command ->
+               if (testingMode) showCommandNotification(command)
+               
+               // Broadcast the command as JSON for MainActivity
+               val commandJson = gson.toJson(command)
+               val commandIntent = Intent(ACTION_COMMAND_RECEIVED)
+               commandIntent.putExtra(EXTRA_JSON_DATA, commandJson)
+               sendBroadcastCompat(commandIntent)
+               Log.d("NocturneService", "Command broadcast sent: $commandJson")
+               
+               handleCommand(command)
+           }
+           
+           bleServerManager = EnhancedBleServerManager(this, bleCommandHandler)
+           Log.d("NocturneService", "EnhancedBleServerManager created")
            bleServerManager.startServer()
            Log.d("NocturneService", "BLE server start requested")
 
@@ -272,6 +297,20 @@ class NocturneService : Service() {
                
                // Broadcast notification for status changes
                broadcastNotification("SPP Server: $status")
+           }
+       }
+   }
+   
+   private fun startPeriodicStateUpdates() {
+       serviceScope.launch {
+           while (isActive) {
+               // Send state update every second regardless of changes
+               // This ensures nocturned always has fresh data
+               if (::bluetoothServerManager.isInitialized && bluetoothServerManager.isConnected() ||
+                   ::bleServerManager.isInitialized && bleServerManager.hasConnectedDevices()) {
+                   sendStateUpdate()
+               }
+               delay(1000) // 1 second interval
            }
        }
    }
@@ -353,6 +392,9 @@ class NocturneService : Service() {
        serviceScope.launch(Dispatchers.IO) {
            val jsonState = gson.toJson(lastState)
            
+           // Send all state updates including position changes
+           // The periodic updates ensure fresh data is always available
+           
            // Broadcast the state update JSON
            val stateIntent = Intent(ACTION_STATE_UPDATED)
            stateIntent.putExtra(EXTRA_JSON_DATA, jsonState)
@@ -361,9 +403,9 @@ class NocturneService : Service() {
            
            // Send via both protocols
            try {
-               // BLE (preferred protocol) - no newline needed
-               if (::bleServerManager.isInitialized && bleServerManager.isConnected()) {
-                   bleServerManager.sendResponse(jsonState)
+               // BLE (preferred protocol) - send StateUpdate object directly
+               if (::bleServerManager.isInitialized) {
+                   bleServerManager.sendStateUpdate(lastState)
                    Log.d("NocturneService", "Sent BLE update: $jsonState")
                }
                
@@ -377,7 +419,6 @@ class NocturneService : Service() {
                if (!::bleServerManager.isInitialized && !::bluetoothServerManager.isInitialized) {
                    Log.w("NocturneService", "No protocol managers initialized")
                }
-               
            } catch (e: Exception) {
                Log.e("NocturneService", "Error sending state update", e)
            }

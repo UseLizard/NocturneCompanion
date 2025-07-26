@@ -236,15 +236,26 @@ class MainActivity : ComponentActivity() {
    }
 
    private fun requestBluetoothConnectPermission() {
+        val permissions = mutableListOf<String>()
+        
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             Log.d("MainActivity", "Requesting Bluetooth permissions for API ${Build.VERSION.SDK_INT}")
-            startServicePermissionLauncher.launch(arrayOf(
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.BLUETOOTH_ADVERTISE
-            ))
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+            permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+        }
+        
+        // Add media permissions
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.READ_MEDIA_AUDIO)
         } else {
-            Log.d("MainActivity", "No special Bluetooth permissions needed for API ${Build.VERSION.SDK_INT}")
-            startNocturneService() // No special permission needed for older versions
+            permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+        
+        if (permissions.isNotEmpty()) {
+            startServicePermissionLauncher.launch(permissions.toTypedArray())
+        } else {
+            Log.d("MainActivity", "No special permissions needed for API ${Build.VERSION.SDK_INT}")
+            startNocturneService()
         }
     }
 

@@ -1,23 +1,41 @@
 package com.paulcity.nocturnecompanion.ble
 
-import android.annotation.SuppressLint
+import android.Manifest
 import android.bluetooth.*
-import android.bluetooth.le.*
+import android.bluetooth.le.AdvertiseCallback
+import android.bluetooth.le.AdvertiseData
+import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
+import android.content.pm.PackageManager
+import android.media.MediaMetadata
 import android.os.Build
 import android.os.ParcelUuid
 import android.util.Log
+import androidx.annotation.RequiresPermission
+import androidx.core.app.ActivityCompat
 import com.google.gson.Gson
 import com.paulcity.nocturnecompanion.data.Command
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.*
-import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlin.coroutines.coroutineContext
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 
-@SuppressLint("MissingPermission")
+/**
+ * Enhanced BLE Server Manager with improved support for:
+ * - Proper GATT server implementation
+ * - Multi-device connection support
+ * - Characteristic notifications
+ * - Connection quality monitoring
+ * - Album art transfer
+ * - Debug logging
+ */
+@Suppress("MissingPermission")
 class EnhancedBleServerManager(
     private val context: Context,
     private val onCommandReceived: (Command) -> Unit,
@@ -25,39 +43,44 @@ class EnhancedBleServerManager(
 ) {
     companion object {
         private const val TAG = "EnhancedBleServer"
-        private val gson = Gson()
+        private const val MAX_NOTIFICATION_SIZE = 512 // Conservative MTU assumption
+        private const val ALBUM_ART_CHUNK_SIZE = 16384 // 16KB chunks for album art
+        private const val MAX_RETRIES = 3
     }
     
-    private val debugLogger = DebugLogger()
-    private val bluetoothManager: BluetoothManager
-    private val bluetoothAdapter: BluetoothAdapter?
+    private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    private val bluetoothAdapter = bluetoothManager.adapter
     private var gattServer: BluetoothGattServer? = null
     private var advertiser: BluetoothLeAdvertiser? = null
-    private var isAdvertising = false
+    private val gson = Gson()
     
     // Connection management
     private val connectedDevices = ConcurrentHashMap<String, DeviceContext>()
-    private val commandIdCounter = AtomicInteger(0)
+    private val _connectionStatus = MutableStateFlow("Disconnected")
+    val connectionStatus: StateFlow<String> = _connectionStatus
     
-    // Album art transfer management
-    private val albumArtTransferJobs = ConcurrentHashMap<String, Job>()
+    // Album art management
     private val albumArtManager = AlbumArtManager()
+    private val mediaStoreAlbumArtManager = MediaStoreAlbumArtManager(context)
+    private val albumArtTransferJobs = ConcurrentHashMap<String, Job>()
     
-    // State flows
-    private val _connectionStatus = MutableStateFlow("Not Initialized")
-    val connectionStatus = _connectionStatus.asStateFlow()
+    // Debug logging
+    private val debugLogger = DebugLogger()
+    private val _debugLogs = MutableSharedFlow<DebugLogger.DebugLogEntry>(replay = 100)
+    val debugLogs = _debugLogs.asSharedFlow()
     
+    // Track last sent state to avoid duplicates
+    private var lastSentStateJson: String = ""
+    
+    // Device tracking for UI
     private val _connectedDevicesList = MutableStateFlow<List<DeviceInfo>>(emptyList())
-    val connectedDevicesList = _connectedDevicesList.asStateFlow()
-    
-    // Debug access
-    val debugLogs = debugLogger.logFlow
+    val connectedDevicesList: StateFlow<List<DeviceInfo>> = _connectedDevicesList
     
     data class DeviceContext(
         val device: BluetoothDevice,
         val connectionTime: Long = System.currentTimeMillis(),
-        var mtu: Int = BleConstants.DEFAULT_MTU,
-        var subscriptions: MutableSet<String> = mutableSetOf(),
+        var mtu: Int = 23, // Default BLE MTU
+        val subscriptions: MutableSet<String> = mutableSetOf(),
         var lastActivity: Long = System.currentTimeMillis()
     )
     
@@ -65,531 +88,790 @@ class EnhancedBleServerManager(
         val address: String,
         val name: String,
         val mtu: Int,
-        val subscriptions: List<String>,
-        val connectionDuration: Long
+        val connectionDuration: Long,
+        val subscriptions: List<String>
     )
     
-    data class CommandAck(
-        val type: String = BleConstants.MessageType.ACK,
-        val command_id: String,
-        val status: String,
-        val message: String
-    )
-    
-    data class ErrorMessage(
-        val type: String = BleConstants.MessageType.ERROR,
-        val code: String,
-        val message: String,
-        val timestamp: Long = System.currentTimeMillis()
-    )
-    
-    data class Capabilities(
-        val type: String = BleConstants.MessageType.CAPABILITIES,
-        val version: String = "2.0",
-        val features: List<String> = listOf(
-            "media_control",
-            "volume_control", 
-            "seek_support",
-            "debug_logging",
-            "album_art",
-            "command_ack",
-            "error_reporting"
-        ),
-        val mtu: Int = BleConstants.TARGET_MTU,
-        val debug_enabled: Boolean = true
-    )
-    
-    data class AlbumArtStart(
-        val type: String = BleConstants.MessageType.ALBUM_ART_START,
-        val size: Int,
+    data class AlbumArtQuery(
+        val type: String = "album_art_query",
         val track_id: String,
         val checksum: String
     )
     
-    data class AlbumArtEnd(
-        val type: String = BleConstants.MessageType.ALBUM_ART_END,
+    data class AlbumArtStart(
+        val type: String = "album_art_start",
         val track_id: String,
         val checksum: String,
+        val size: Int,
         val total_chunks: Int
     )
     
-    init {
-        bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        bluetoothAdapter = bluetoothManager.adapter
-        
-        debugLogger.info(
-            DebugLogger.LogType.INITIALIZATION,
-            "BLE Server Manager initialized",
-            mapOf(
-                "bluetooth_enabled" to (bluetoothAdapter?.isEnabled ?: false),
-                "le_supported" to (bluetoothAdapter?.isMultipleAdvertisementSupported ?: false)
-            )
-        )
+    data class AlbumArtChunk(
+        val type: String = "album_art_chunk",
+        val checksum: String,
+        val chunk_index: Int,
+        val data: String // Base64 encoded chunk
+    )
+    
+    data class AlbumArtEnd(
+        val type: String = "album_art_end",
+        val checksum: String,
+        val success: Boolean
+    )
+    
+    private fun hasPermission(permission: String): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            ActivityCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
     }
     
     fun startServer() {
-        if (bluetoothAdapter?.isEnabled != true) {
-            val message = "Bluetooth is not enabled"
-            debugLogger.error(DebugLogger.LogType.ERROR, message)
-            _connectionStatus.value = message
+        if (!bluetoothAdapter.isEnabled) {
+            Log.e(TAG, "Bluetooth is not enabled")
+            _connectionStatus.value = "Bluetooth Disabled"
             return
         }
         
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                setupGattServer()
-                startAdvertising()
-                _connectionStatus.value = "Advertising"
-                debugLogger.info(DebugLogger.LogType.INITIALIZATION, "BLE server started successfully")
-            } catch (e: Exception) {
-                val message = "Failed to start server: ${e.message}"
-                debugLogger.error(DebugLogger.LogType.ERROR, message, mapOf("exception" to e.toString()))
-                _connectionStatus.value = message
+        // Check permissions
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT) || 
+                !hasPermission(Manifest.permission.BLUETOOTH_ADVERTISE)) {
+                Log.e(TAG, "Missing required Bluetooth permissions")
+                _connectionStatus.value = "Permission Denied"
+                return
             }
+        }
+        
+        setupGattServer()
+        startAdvertising()
+        
+        debugLogger.info("SERVER_STATE", "BLE server started")
+        CoroutineScope(Dispatchers.IO).launch {
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
         }
     }
     
     private fun setupGattServer() {
-        val gattServerCallback = object : BluetoothGattServerCallback() {
-            
-            override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
-                super.onConnectionStateChange(device, status, newState)
-                
-                when (newState) {
-                    BluetoothProfile.STATE_CONNECTED -> handleDeviceConnected(device)
-                    BluetoothProfile.STATE_DISCONNECTED -> handleDeviceDisconnected(device)
-                }
-            }
-            
-            override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
-                super.onMtuChanged(device, mtu)
-                
-                connectedDevices[device.address]?.let { context ->
-                    context.mtu = mtu
-                    debugLogger.info(
-                        DebugLogger.LogType.MTU_CHANGED,
-                        "MTU changed for device",
-                        mapOf("device" to device.address, "mtu" to mtu)
-                    )
-                }
-            }
-            
-            override fun onCharacteristicReadRequest(
-                device: BluetoothDevice,
-                requestId: Int,
-                offset: Int,
-                characteristic: BluetoothGattCharacteristic
-            ) {
-                super.onCharacteristicReadRequest(device, requestId, offset, characteristic)
-                
-                when (characteristic.uuid) {
-                    BleConstants.DEVICE_INFO_CHAR_UUID -> {
-                        val capabilities = gson.toJson(Capabilities())
-                        val response = capabilities.toByteArray(StandardCharsets.UTF_8)
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, 
-                            response.sliceArray(offset until minOf(offset + BleConstants.MAX_CHARACTERISTIC_LENGTH, response.size)))
-                        
-                        debugLogger.debug(
-                            DebugLogger.LogType.CHARACTERISTIC_WRITE,
-                            "Device info read",
-                            mapOf("device" to device.address, "offset" to offset)
-                        )
-                    }
-                    else -> {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
-                    }
-                }
-            }
-            
-            override fun onCharacteristicWriteRequest(
-                device: BluetoothDevice,
-                requestId: Int,
-                characteristic: BluetoothGattCharacteristic,
-                preparedWrite: Boolean,
-                responseNeeded: Boolean,
-                offset: Int,
-                value: ByteArray?
-            ) {
-                super.onCharacteristicWriteRequest(device, requestId, characteristic, preparedWrite, responseNeeded, offset, value)
-                
-                when (characteristic.uuid) {
-                    BleConstants.COMMAND_RX_CHAR_UUID -> {
-                        value?.let { handleCommandReceived(device, it) }
-                    }
-                }
-                
-                if (responseNeeded) {
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
-                }
-            }
-            
-            override fun onDescriptorWriteRequest(
-                device: BluetoothDevice,
-                requestId: Int,
-                descriptor: BluetoothGattDescriptor,
-                preparedWrite: Boolean,
-                responseNeeded: Boolean,
-                offset: Int,
-                value: ByteArray?
-            ) {
-                super.onDescriptorWriteRequest(device, requestId, descriptor, preparedWrite, responseNeeded, offset, value)
-                
-                if (descriptor.uuid == BleConstants.CLIENT_CHARACTERISTIC_CONFIG_UUID) {
-                    handleSubscriptionChange(device, descriptor.characteristic, value)
-                }
-                
-                if (responseNeeded) {
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
-                }
-            }
-        }
+        val service = BluetoothGattService(
+            BleConstants.NOCTURNE_SERVICE_UUID,
+            BluetoothGattService.SERVICE_TYPE_PRIMARY
+        )
         
-        // Create GATT Service
-        val service = BluetoothGattService(BleConstants.NOCTURNE_SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
-        
-        // Command RX Characteristic
+        // Command receive characteristic (write)
         val commandChar = BluetoothGattCharacteristic(
             BleConstants.COMMAND_RX_CHAR_UUID,
             BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
             BluetoothGattCharacteristic.PERMISSION_WRITE
         )
-        service.addCharacteristic(commandChar)
         
-        // State TX Characteristic
-        val stateChar = createNotifyCharacteristic(BleConstants.STATE_TX_CHAR_UUID)
-        service.addCharacteristic(stateChar)
-        
-        // Debug Log Characteristic
-        val debugChar = createNotifyCharacteristic(BleConstants.DEBUG_LOG_CHAR_UUID)
-        service.addCharacteristic(debugChar)
-        
-        // Device Info Characteristic
-        val infoChar = BluetoothGattCharacteristic(
-            BleConstants.DEVICE_INFO_CHAR_UUID,
-            BluetoothGattCharacteristic.PROPERTY_READ,
+        // State transmit characteristic (notify)
+        val stateChar = BluetoothGattCharacteristic(
+            BleConstants.STATE_TX_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_READ
         )
-        service.addCharacteristic(infoChar)
-        
-        // Album Art TX Characteristic
-        val albumArtChar = createNotifyCharacteristic(BleConstants.ALBUM_ART_TX_CHAR_UUID)
-        service.addCharacteristic(albumArtChar)
-        
-        // Open GATT Server
-        gattServer = bluetoothManager.openGattServer(context, gattServerCallback)
-        gattServer?.addService(service) ?: throw Exception("Failed to add GATT service")
-        
-        // Start debug log streaming
-        startDebugLogStreaming()
-    }
-    
-    private fun createNotifyCharacteristic(uuid: UUID): BluetoothGattCharacteristic {
-        val char = BluetoothGattCharacteristic(
-            uuid,
-            BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-            BluetoothGattCharacteristic.PERMISSION_READ
-        )
-        
-        val descriptor = BluetoothGattDescriptor(
+        val stateDescriptor = BluetoothGattDescriptor(
             BleConstants.CLIENT_CHARACTERISTIC_CONFIG_UUID,
             BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
         )
-        char.addDescriptor(descriptor)
+        stateChar.addDescriptor(stateDescriptor)
         
-        return char
-    }
-    
-    private fun handleDeviceConnected(device: BluetoothDevice) {
-        val context = DeviceContext(device)
-        connectedDevices[device.address] = context
-        
-        debugLogger.info(
-            DebugLogger.LogType.CONNECTION,
-            "Device connected",
-            mapOf(
-                "address" to device.address,
-                "name" to (device.name ?: "Unknown")
-            )
+        // Album art characteristic (notify, larger chunks)
+        val albumArtChar = BluetoothGattCharacteristic(
+            BleConstants.ALBUM_ART_TX_CHAR_UUID,
+            BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
         )
-        
-        updateConnectionStatus()
-        updateConnectedDevicesList()
-        
-        // Send initial capabilities
-        CoroutineScope(Dispatchers.IO).launch {
-            delay(100) // Small delay to ensure connection is stable
-            sendCapabilities(device)
-            
-            // Wait longer to ensure client has time to subscribe to notifications
-            delay(3000) // 3 second delay to allow subscription
-            onDeviceConnected?.invoke(device)
-        }
-    }
-    
-    private fun handleDeviceDisconnected(device: BluetoothDevice) {
-        val context = connectedDevices.remove(device.address)
-        
-        debugLogger.info(
-            DebugLogger.LogType.DISCONNECTION,
-            "Device disconnected",
-            mapOf(
-                "address" to device.address,
-                "connection_duration" to (context?.let { System.currentTimeMillis() - it.connectionTime } ?: 0)
-            )
+        val albumArtDescriptor = BluetoothGattDescriptor(
+            BleConstants.CLIENT_CHARACTERISTIC_CONFIG_UUID,
+            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
         )
+        albumArtChar.addDescriptor(albumArtDescriptor)
         
-        updateConnectionStatus()
-        updateConnectedDevicesList()
+        service.addCharacteristic(commandChar)
+        service.addCharacteristic(stateChar)
+        service.addCharacteristic(albumArtChar)
         
-        // Resume advertising if no devices connected
-        if (connectedDevices.isEmpty() && !isAdvertising) {
-            startAdvertising()
-        }
+        gattServer = bluetoothManager.openGattServer(context, gattServerCallback)
+        gattServer?.addService(service)
+        
+        Log.d(TAG, "GATT server setup complete")
     }
     
-    private fun handleSubscriptionChange(device: BluetoothDevice, characteristic: BluetoothGattCharacteristic, value: ByteArray?) {
-        val isEnabled = value?.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ?: false
-        val charUuid = characteristic.uuid.toString()
-        
-        connectedDevices[device.address]?.let { context ->
-            if (isEnabled) {
-                context.subscriptions.add(charUuid)
-                debugLogger.debug(
-                    "SUBSCRIPTION",
-                    "Notifications enabled",
-                    mapOf("device" to device.address, "characteristic" to charUuid)
-                )
-            } else {
-                context.subscriptions.remove(charUuid)
-                debugLogger.debug(
-                    "SUBSCRIPTION",
-                    "Notifications disabled",
-                    mapOf("device" to device.address, "characteristic" to charUuid)
-                )
-            }
-        }
-        
-        updateConnectedDevicesList()
-    }
-    
-    private fun handleCommandReceived(device: BluetoothDevice, data: ByteArray) {
-        try {
-            val jsonStr = String(data, StandardCharsets.UTF_8)
-            val commandId = "cmd_${commandIdCounter.incrementAndGet()}"
-            
-            debugLogger.info(
-                DebugLogger.LogType.COMMAND_RECEIVED,
-                "Command received",
-                mapOf(
-                    "device" to device.address,
-                    "command_id" to commandId,
-                    "data" to jsonStr,
-                    "size" to data.size
-                )
-            )
-            
-            val command = gson.fromJson(jsonStr, Command::class.java)
-            
-            // Send acknowledgment
-            sendAck(device, commandId, "received", "Command received and processing")
-            
-            // Execute command
-            onCommandReceived(command)
-            
-            // Send success acknowledgment
-            sendAck(device, commandId, "success", "Command executed successfully")
-            
-            debugLogger.info(
-                DebugLogger.LogType.COMMAND_EXECUTED,
-                "Command executed",
-                mapOf(
-                    "command_id" to commandId,
-                    "command" to command.command
-                )
-            )
-            
-        } catch (e: Exception) {
-            debugLogger.error(
-                DebugLogger.LogType.ERROR,
-                "Failed to process command",
-                mapOf(
-                    "device" to device.address,
-                    "error" to (e.message ?: "Unknown error"),
-                    "data" to String(data, StandardCharsets.UTF_8)
-                )
-            )
-            
-            sendError(device, "COMMAND_PARSE_ERROR", e.message ?: "Unknown error")
-        }
-    }
-    
-    private fun sendAck(device: BluetoothDevice, commandId: String, status: String, message: String) {
-        val ack = CommandAck(command_id = commandId, status = status, message = message)
-        sendNotification(device, BleConstants.STATE_TX_CHAR_UUID, gson.toJson(ack))
-    }
-    
-    private fun sendError(device: BluetoothDevice, code: String, message: String) {
-        val error = ErrorMessage(code = code, message = message)
-        sendNotification(device, BleConstants.STATE_TX_CHAR_UUID, gson.toJson(error))
-    }
-    
-    private fun sendCapabilities(device: BluetoothDevice) {
-        val capabilities = Capabilities(mtu = connectedDevices[device.address]?.mtu ?: BleConstants.DEFAULT_MTU)
-        sendNotification(device, BleConstants.STATE_TX_CHAR_UUID, gson.toJson(capabilities))
-    }
-    
-    fun sendStateUpdate(stateUpdate: StateUpdate) {
-        val json = gson.toJson(stateUpdate)
-        
-        debugLogger.debug(
-            DebugLogger.LogType.STATE_UPDATED,
-            "Sending state update",
-            mapOf(
-                "is_playing" to stateUpdate.is_playing,
-                "track" to (stateUpdate.track ?: "Unknown")
-            )
-        )
-        
-        connectedDevices.values.forEach { context ->
-            if (context.subscriptions.contains(BleConstants.STATE_TX_CHAR_UUID.toString())) {
-                sendNotification(context.device, BleConstants.STATE_TX_CHAR_UUID, json)
-            }
-        }
-    }
-    
-    fun sendStateUpdate(data: Map<String, Any>) {
-        val json = gson.toJson(data)
-        
-        debugLogger.debug(
-            DebugLogger.LogType.STATE_UPDATED,
-            "Sending custom state update",
-            mapOf(
-                "type" to (data["type"] ?: "unknown"),
-                "size" to json.length
-            )
-        )
-        
-        connectedDevices.values.forEach { context ->
-            if (context.subscriptions.contains(BleConstants.STATE_TX_CHAR_UUID.toString())) {
-                sendNotification(context.device, BleConstants.STATE_TX_CHAR_UUID, json)
-            }
-        }
-    }
-    
-    private fun sendNotification(device: BluetoothDevice, characteristicUuid: UUID, data: String) {
-        val bytes = data.toByteArray(StandardCharsets.UTF_8)
-        val service = gattServer?.getService(BleConstants.NOCTURNE_SERVICE_UUID)
-        val characteristic = service?.getCharacteristic(characteristicUuid)
-        
-        characteristic?.let { char ->
-            char.value = bytes
-            val success = gattServer?.notifyCharacteristicChanged(device, char, false) ?: false
-            
-            if (success) {
-                debugLogger.verbose(
-                    DebugLogger.LogType.NOTIFICATION_SENT,
-                    "Notification sent",
-                    mapOf(
-                        "device" to device.address,
-                        "characteristic" to characteristicUuid.toString(),
-                        "size" to bytes.size
-                    )
-                )
-            } else {
-                debugLogger.warning(
-                    DebugLogger.LogType.ERROR,
-                    "Failed to send notification",
-                    mapOf(
-                        "device" to device.address,
-                        "characteristic" to characteristicUuid.toString()
-                    )
-                )
-            }
-        }
-    }
-    
-    private fun startDebugLogStreaming() {
-        CoroutineScope(Dispatchers.IO).launch {
-            debugLogger.logFlow.collect { logEntry ->
-                val json = logEntry.toJson()
+    private val gattServerCallback = object : BluetoothGattServerCallback() {
+        override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+            // Log connection status for debugging
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                val statusName = when (status) {
+                    0x01 -> "GATT_INVALID_HANDLE"
+                    0x02 -> "GATT_READ_NOT_PERMITTED" 
+                    0x03 -> "GATT_WRITE_NOT_PERMITTED"
+                    0x04 -> "GATT_INVALID_PDU"
+                    0x05 -> "GATT_INSUFFICIENT_AUTHENTICATION"
+                    0x06 -> "GATT_REQUEST_NOT_SUPPORTED"
+                    0x07 -> "GATT_INVALID_OFFSET"
+                    0x08 -> "GATT_INSUFFICIENT_AUTHORIZATION"
+                    0x09 -> "GATT_PREPARE_QUEUE_FULL"
+                    0x0a -> "GATT_ATTRIBUTE_NOT_FOUND"
+                    0x0b -> "GATT_ATTRIBUTE_NOT_LONG"
+                    0x0c -> "GATT_INSUFFICIENT_ENCRYPTION_KEY_SIZE"
+                    0x0d -> "GATT_INVALID_ATTRIBUTE_LENGTH"
+                    0x0e -> "GATT_UNLIKELY_ERROR"
+                    0x0f -> "GATT_INSUFFICIENT_ENCRYPTION"
+                    0x10 -> "GATT_UNSUPPORTED_GROUP_TYPE"
+                    0x11 -> "GATT_INSUFFICIENT_RESOURCES"
+                    else -> "UNKNOWN_ERROR_$status"
+                }
                 
-                connectedDevices.values.forEach { context ->
-                    if (context.subscriptions.contains(BleConstants.DEBUG_LOG_CHAR_UUID.toString())) {
-                        sendNotification(context.device, BleConstants.DEBUG_LOG_CHAR_UUID, json)
+                Log.e(TAG, "Connection state change with error - Status: $status ($statusName), State: $newState")
+                debugLogger.error(
+                    "CONNECTION_ERROR",
+                    "Connection state change failed",
+                    mapOf(
+                        "device" to device.address,
+                        "status_code" to status.toString(),
+                        "status_name" to statusName,
+                        "new_state" to newState.toString()
+                    )
+                )
+            }
+            
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        Log.i(TAG, "Device connected: ${device.address}")
+                        val deviceContext = DeviceContext(device)
+                        connectedDevices[device.address] = deviceContext
+                        updateConnectionStatus()
+                        updateConnectedDevicesList()
+                        
+                        // Try to request higher MTU for better performance
+                        gattServer?.connect(device, false)
+                        
+                        debugLogger.info(
+                            "CONNECTION",
+                            "Device connected",
+                            mapOf("address" to device.address, "name" to (device.name ?: "Unknown"))
+                        )
+                        
+                        // Notify callback if provided
+                        onDeviceConnected?.invoke(device)
+                    } else {
+                        Log.e(TAG, "Connection failed for device: ${device.address}")
+                    }
+                    
+                    CoroutineScope(Dispatchers.IO).launch {
+                        _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
                     }
                 }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    Log.i(TAG, "Device disconnected: ${device.address} (status: $status)")
+                    
+                    // Cancel any ongoing album art transfer
+                    albumArtTransferJobs[device.address]?.cancel()
+                    albumArtTransferJobs.remove(device.address)
+                    
+                    connectedDevices.remove(device.address)
+                    updateConnectionStatus()
+                    updateConnectedDevicesList()
+                    
+                    debugLogger.info(
+                        "CONNECTION",
+                        "Device disconnected",
+                        mapOf(
+                            "address" to device.address,
+                            "status" to status.toString()
+                        )
+                    )
+                    
+                    CoroutineScope(Dispatchers.IO).launch {
+                        _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+                    }
+                }
+            }
+        }
+        
+        override fun onCharacteristicWriteRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            characteristic: BluetoothGattCharacteristic,
+            preparedWrite: Boolean,
+            responseNeeded: Boolean,
+            offset: Int,
+            value: ByteArray?
+        ) {
+            Log.d(TAG, "Write request from ${device.address} to ${characteristic.uuid}")
+            
+            if (characteristic.uuid == BleConstants.COMMAND_RX_CHAR_UUID && value != null) {
+                try {
+                    val jsonStr = String(value, Charsets.UTF_8).trim()
+                    Log.d(TAG, "Received command: $jsonStr")
+                    
+                    debugLogger.debug(
+                        "COMMAND_RECEIVED",
+                        "Raw command data",
+                        mapOf("data" to jsonStr, "device" to device.address)
+                    )
+                    
+                    // Parse command
+                    val command = gson.fromJson(jsonStr, Command::class.java)
+                    
+                    // Handle special commands
+                    when (command.command) {
+                        "album_art_needed" -> {
+                            // Extract track_id and checksum from payload
+                            val payload = command.payload
+                            val trackId = payload?.get("track_id") as? String ?: ""
+                            val checksum = payload?.get("checksum") as? String ?: ""
+                            
+                            debugLogger.info(
+                                "ALBUM_ART",
+                                "Album art requested",
+                                mapOf("track_id" to trackId, "checksum" to checksum)
+                            )
+                            
+                            startAlbumArtTransfer(trackId, checksum)
+                        }
+                        else -> {
+                            // Regular command
+                            onCommandReceived(command)
+                            
+                            debugLogger.info(
+                                "COMMAND_RECEIVED",
+                                "Command processed: ${command.command}",
+                                mapOf("device" to device.address)
+                            )
+                        }
+                    }
+                    
+                    CoroutineScope(Dispatchers.IO).launch {
+                        _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+                    }
+                    
+                    // Update last activity
+                    connectedDevices[device.address]?.lastActivity = System.currentTimeMillis()
+                    
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error parsing command", e)
+                    
+                    debugLogger.error(
+                        "ERROR",
+                        "Command parse error: ${e.message}",
+                        mapOf("device" to device.address)
+                    )
+                    
+                    CoroutineScope(Dispatchers.IO).launch {
+                        _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+                    }
+                }
+            }
+            
+            if (responseNeeded) {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            }
+        }
+        
+        override fun onDescriptorWriteRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            descriptor: BluetoothGattDescriptor,
+            preparedWrite: Boolean,
+            responseNeeded: Boolean,
+            offset: Int,
+            value: ByteArray?
+        ) {
+            Log.d(TAG, "Descriptor write request from ${device.address}")
+            
+            if (descriptor.uuid == BleConstants.CLIENT_CHARACTERISTIC_CONFIG_UUID) {
+                val charUuid = descriptor.characteristic.uuid
+                val enableNotifications = value?.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ?: false
+                
+                if (enableNotifications) {
+                    connectedDevices[device.address]?.subscriptions?.add(charUuid.toString())
+                    Log.d(TAG, "Notifications enabled for $charUuid")
+                    
+                    debugLogger.info(
+                        "SUBSCRIPTION",
+                        "Notifications enabled",
+                        mapOf("char" to charUuid.toString(), "device" to device.address)
+                    )
+                } else {
+                    connectedDevices[device.address]?.subscriptions?.remove(charUuid.toString())
+                    Log.d(TAG, "Notifications disabled for $charUuid")
+                    
+                    debugLogger.info(
+                        "SUBSCRIPTION",
+                        "Notifications disabled",
+                        mapOf("char" to charUuid.toString(), "device" to device.address)
+                    )
+                }
+                
+                updateConnectedDevicesList()
+                
+                CoroutineScope(Dispatchers.IO).launch {
+                    _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+                }
+            }
+            
+            if (responseNeeded) {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            }
+        }
+        
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            Log.d(TAG, "MTU changed for ${device.address}: $mtu")
+            connectedDevices[device.address]?.mtu = mtu
+            updateConnectedDevicesList()
+            
+            debugLogger.info(
+                "MTU_CHANGED",
+                "MTU changed",
+                mapOf("device" to device.address, "mtu" to mtu)
+            )
+            
+            CoroutineScope(Dispatchers.IO).launch {
+                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
             }
         }
     }
     
     private fun startAdvertising() {
-        if (isAdvertising) return
+        advertiser = bluetoothAdapter.bluetoothLeAdvertiser
         
-        advertiser = bluetoothAdapter?.bluetoothLeAdvertiser
         if (advertiser == null) {
-            debugLogger.error(DebugLogger.LogType.ERROR, "BLE advertising not supported")
+            Log.e(TAG, "BLE advertising not supported")
+            _connectionStatus.value = "Advertising Not Supported"
             return
         }
         
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
             .setConnectable(true)
-            .setTimeout(BleConstants.ADVERTISING_TIMEOUT_MS.toInt())
+            .setTimeout(0)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
             .build()
         
-        // Primary advertising data - keep minimal to avoid exceeding 31 byte limit
         val data = AdvertiseData.Builder()
-            .setIncludeDeviceName(false)  // Don't include name in primary packet
-            .setIncludeTxPowerLevel(false) // Don't include TX power
+            .setIncludeDeviceName(false)  // Device name in scan response instead
             .addServiceUuid(ParcelUuid(BleConstants.NOCTURNE_SERVICE_UUID))
             .build()
         
-        // Scan response can include additional data
+        // Scan response can include additional data like device name
         val scanResponse = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)  // Include name in scan response
+            .setIncludeDeviceName(true)
             .build()
         
-        advertiser?.startAdvertising(settings, data, scanResponse, object : AdvertiseCallback() {
-            override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-                isAdvertising = true
-                debugLogger.info(
-                    DebugLogger.LogType.ADVERTISING,
-                    "Advertising started",
-                    mapOf(
-                        "mode" to settingsInEffect.mode,
-                        "tx_power" to settingsInEffect.txPowerLevel
-                    )
-                )
-                _connectionStatus.value = "Advertising"
-            }
-            
-            override fun onStartFailure(errorCode: Int) {
-                isAdvertising = false
-                debugLogger.error(
-                    DebugLogger.LogType.ERROR,
-                    "Advertising failed",
-                    mapOf("error_code" to errorCode)
-                )
-                _connectionStatus.value = "Advertising failed ($errorCode)"
-            }
-        })
+        advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
     }
     
-    private fun stopAdvertising() {
-        if (!isAdvertising) return
+    private val advertiseCallback = object : AdvertiseCallback() {
+        override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+            Log.d(TAG, "Advertising started successfully")
+            _connectionStatus.value = "Advertising"
+            
+            debugLogger.info("SERVER_STATE", "Advertising started")
+            CoroutineScope(Dispatchers.IO).launch {
+                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+            }
+        }
         
-        advertiser?.stopAdvertising(object : AdvertiseCallback() {})
-        isAdvertising = false
-        debugLogger.info(DebugLogger.LogType.ADVERTISING, "Advertising stopped")
+        override fun onStartFailure(errorCode: Int) {
+            Log.e(TAG, "Advertising start failed: $errorCode")
+            _connectionStatus.value = "Advertising Failed: $errorCode"
+            
+            debugLogger.error(
+                "ERROR",
+                "Advertising failed",
+                mapOf("error_code" to errorCode)
+            )
+            CoroutineScope(Dispatchers.IO).launch {
+                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+            }
+        }
+    }
+    
+    fun sendStateUpdate(state: StateUpdate) {
+        val stateJson = gson.toJson(state)
+        
+        // Only send if state actually changed (excluding position for comparison)
+        val stateForComparison = state.copy(position_ms = 0)
+        val compareJson = gson.toJson(stateForComparison)
+        
+        if (compareJson != lastSentStateJson) {
+            lastSentStateJson = compareJson
+            
+            debugLogger.verbose(
+                "STATE_SENT",
+                "Sending state update",
+                mapOf("state" to stateJson)
+            )
+            
+            sendNotificationToAll(BleConstants.STATE_TX_CHAR_UUID, stateJson)
+            
+            CoroutineScope(Dispatchers.IO).launch {
+                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+            }
+        }
+    }
+    
+    fun sendStateUpdate(data: Any) {
+        val json = gson.toJson(data)
+        
+        debugLogger.verbose(
+            "STATE_SENT",
+            "Sending custom state",
+            mapOf("data" to json)
+        )
+        
+        sendNotificationToAll(BleConstants.STATE_TX_CHAR_UUID, json)
+        
+        CoroutineScope(Dispatchers.IO).launch {
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+        }
+    }
+    
+    private fun sendNotificationToAll(characteristicUuid: UUID, data: String) {
+        val dataBytes = data.toByteArray(Charsets.UTF_8)
+        
+        connectedDevices.values.forEach { context ->
+            if (context.subscriptions.contains(characteristicUuid.toString())) {
+                sendNotificationToDevice(context.device, characteristicUuid, dataBytes)
+            }
+        }
+    }
+    
+    private fun sendNotificationToDevice(device: BluetoothDevice, characteristicUuid: UUID, data: ByteArray) {
+        val service = gattServer?.getService(BleConstants.NOCTURNE_SERVICE_UUID)
+        val characteristic = service?.getCharacteristic(characteristicUuid)
+        
+        if (characteristic != null) {
+            // Get the actual MTU for this device, accounting for ATT header
+            val deviceContext = connectedDevices[device.address]
+            val effectiveMtu = (deviceContext?.mtu ?: 23) - 3 // 3 bytes for ATT header
+            
+            // Check if data fits within MTU
+            if (data.size <= effectiveMtu) {
+                characteristic.value = data
+                try {
+                    val sent = gattServer?.notifyCharacteristicChanged(device, characteristic, false) ?: false
+                    if (!sent) {
+                        Log.w(TAG, "Failed to send notification to ${device.address}")
+                        debugLogger.error(
+                            "NOTIFICATION_FAILED",
+                            "Failed to send notification",
+                            mapOf(
+                                "device" to device.address,
+                                "char_uuid" to characteristicUuid.toString(),
+                                "data_size" to data.size.toString()
+                            )
+                        )
+                    }
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "SecurityException sending notification", e)
+                    debugLogger.error(
+                        "NOTIFICATION_ERROR",
+                        "Security exception during notification",
+                        mapOf(
+                            "device" to device.address,
+                            "error" to e.message.orEmpty()
+                        )
+                    )
+                }
+            } else {
+                // Data exceeds MTU - need to implement chunking
+                Log.w(TAG, "Data size ${data.size} exceeds MTU-3 ($effectiveMtu) for device ${device.address}")
+                debugLogger.warning(
+                    "DATA_TOO_LARGE",
+                    "Notification data exceeds MTU",
+                    mapOf(
+                        "device" to device.address,
+                        "data_size" to data.size.toString(),
+                        "mtu" to deviceContext?.mtu.toString(),
+                        "effective_mtu" to effectiveMtu.toString()
+                    )
+                )
+                
+                // For now, truncate to fit MTU to prevent complete failure
+                // TODO: Implement proper chunking protocol
+                val truncatedData = data.sliceArray(0 until effectiveMtu)
+                characteristic.value = truncatedData
+                try {
+                    gattServer?.notifyCharacteristicChanged(device, characteristic, false)
+                    Log.w(TAG, "Sent truncated notification (${truncatedData.size} of ${data.size} bytes)")
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "SecurityException sending truncated notification", e)
+                }
+            }
+        }
+        
+        // Emit debug log asynchronously
+        CoroutineScope(Dispatchers.IO).launch {
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+        }
+    }
+    
+    fun sendAlbumArtFromMetadata(metadata: android.media.MediaMetadata?, trackId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
+            val album = metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+            val title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
+            val cacheKey = "$artist|$album|$title"
+            
+            // Add detailed logging to help diagnose the issue
+            debugLogger.info(
+                "ALBUM_ART",
+                "Checking album art for track",
+                mapOf(
+                    "artist" to artist,
+                    "album" to album, 
+                    "title" to title,
+                    "has_metadata" to (metadata != null).toString()
+                )
+            )
+
+            // Try MediaStore approach which is more reliable
+            mediaStoreAlbumArtManager.getAlbumArt(metadata)?.let { (artData, checksum) ->
+                debugLogger.info(
+                    "ALBUM_ART",
+                    "Album art extracted successfully",
+                    mapOf(
+                        "size" to artData.size.toString(),
+                        "checksum" to checksum,
+                        "track_id" to trackId,
+                        "source" to "MediaStore"
+                    )
+                )
+                sendAlbumArt(artData, checksum, cacheKey)
+            } ?: run {
+                // Enhanced logging to understand why album art is not available
+                val hasArt = metadata?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART) != null
+                val hasArt2 = metadata?.getBitmap(MediaMetadata.METADATA_KEY_ART) != null  
+                val hasIcon = metadata?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON) != null
+                
+                debugLogger.info(
+                    "NOTIFICATION_SENT",
+                    "No album art available from MediaStore or MediaMetadata",
+                    mapOf(
+                        "track_id" to trackId,
+                        "has_ALBUM_ART" to hasArt.toString(),
+                        "has_ART" to hasArt2.toString(),
+                        "has_DISPLAY_ICON" to hasIcon.toString(),
+                        "metadata_null" to (metadata == null).toString(),
+                        "artist" to artist,
+                        "album" to album,
+                        "title" to title
+                    )
+                )
+            }
+            
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+        }
+    }
+    
+    fun sendAlbumArt(albumArtData: ByteArray, checksum: String, trackId: String) {
+        // For now, immediately start the transfer without waiting for a query
+        // This simplifies the implementation until nocturned supports the query/response pattern
+        
+        debugLogger.info(
+            "ALBUM_ART",
+            "Starting album art transfer immediately",
+            mapOf("track_id" to trackId, "checksum" to checksum, "size" to albumArtData.size.toString())
+        )
+        
+        CoroutineScope(Dispatchers.IO).launch {
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+        }
+        
+        // Cache the album art data
+        albumArtManager.getArtFromCache(trackId) ?: run {
+            // Add to cache if not already there
+            try {
+                val cacheField = AlbumArtManager::class.java.getDeclaredField("albumArtCache")
+                cacheField.isAccessible = true
+                val cache = cacheField.get(albumArtManager) as android.util.LruCache<String, AlbumArtManager.CachedAlbumArt>
+                cache.put(trackId, AlbumArtManager.CachedAlbumArt(albumArtData, checksum))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to add to cache", e)
+            }
+        }
+        
+        // Start transfer immediately
+        startAlbumArtTransfer(trackId, checksum)
+    }
+
+    fun startAlbumArtTransfer(trackId: String, checksum: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            // This function is called when nocturned confirms it needs the album art
+            // Use trackId as the cache key for now - ideally we'd have the full metadata
+            val cachedArt = albumArtManager.getArtFromCache(trackId)
+            if (cachedArt != null && cachedArt.checksum == checksum) {
+                val albumArtData = cachedArt.data
+                // Send to all connected devices that have subscribed to album art
+                connectedDevices.values.forEach { context ->
+                    if (context.subscriptions.contains(BleConstants.ALBUM_ART_TX_CHAR_UUID.toString())) {
+                        // Cancel any existing transfer for this specific device
+                        albumArtTransferJobs[context.device.address]?.cancel()
+
+                        val job = launch {
+                            sendAlbumArtToDevice(context.device, albumArtData, checksum, trackId)
+                        }
+                        albumArtTransferJobs[context.device.address] = job
+                    }
+                }
+            } else {
+                Log.w(TAG, "Album art not found in cache for transfer: $trackId")
+                debugLogger.warning(
+                    "ALBUM_ART",
+                    "Album art not in cache",
+                    mapOf("track_id" to trackId, "checksum" to checksum)
+                )
+                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+            }
+        }
+    }
+    
+    private suspend fun sendAlbumArtToDevice(
+        device: BluetoothDevice,
+        albumArtData: ByteArray,
+        checksum: String,
+        trackId: String
+    ) {
+        try {
+            val deviceContext = connectedDevices[device.address] ?: return
+            val effectiveMtu = deviceContext.mtu - 3 // Account for BLE overhead
+            
+            // Account for JSON overhead when calculating chunk size
+            // JSON structure: {"type":"album_art_chunk","checksum":"...","chunk_index":0,"data":"..."}
+            // Estimated overhead: ~100 bytes for JSON structure + checksum
+            val jsonOverhead = 150 // Conservative estimate for JSON wrapper
+            val maxDataSize = effectiveMtu - jsonOverhead
+            val chunkSize = minOf(maxDataSize, 400) // Conservative chunk size
+            
+            // Convert to base64 for transmission
+            val base64Data = android.util.Base64.encodeToString(albumArtData, android.util.Base64.NO_WRAP)
+            val totalChunks = (base64Data.length + chunkSize - 1) / chunkSize
+            
+            Log.d(TAG, "Starting album art transfer to ${device.address}: ${albumArtData.size} bytes, $totalChunks chunks, MTU: ${deviceContext.mtu}, chunk size: $chunkSize")
+            
+            // Send start notification
+            val startMsg = AlbumArtStart(
+                track_id = trackId,
+                checksum = checksum,
+                size = albumArtData.size,
+                total_chunks = totalChunks
+            )
+            
+            val startData = gson.toJson(startMsg).toByteArray()
+            sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, startData)
+            
+            debugLogger.info(
+                "ALBUM_ART",
+                "Album art transfer started",
+                mapOf(
+                    "device" to device.address,
+                    "size" to albumArtData.size.toString(),
+                    "chunks" to totalChunks.toString()
+                )
+            )
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
+            
+            delay(50) // Small delay between start and chunks
+            
+            // Send chunks
+            for (i in 0 until totalChunks) {
+                val currentJob = albumArtTransferJobs[device.address]
+                if (currentJob == null || !currentJob.isActive) break // Check if coroutine was cancelled
+                
+                val start = i * chunkSize
+                val end = minOf(start + chunkSize, base64Data.length)
+                val chunkData = base64Data.substring(start, end)
+                
+                val chunk = AlbumArtChunk(
+                    checksum = checksum,
+                    chunk_index = i,
+                    data = chunkData
+                )
+                
+                val chunkJson = gson.toJson(chunk).toByteArray()
+                
+                // Log if chunk is approaching MTU limit
+                if (chunkJson.size > effectiveMtu) {
+                    Log.e(TAG, "Album art chunk too large! Chunk size: ${chunkJson.size}, MTU limit: $effectiveMtu")
+                    debugLogger.error(
+                        "CHUNK_TOO_LARGE", 
+                        "Album art chunk exceeds MTU",
+                        mapOf(
+                            "chunk_size" to chunkJson.size.toString(),
+                            "mtu_limit" to effectiveMtu.toString(),
+                            "chunk_index" to i.toString()
+                        )
+                    )
+                }
+                
+                sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, chunkJson)
+                
+                if (i % 10 == 0) {
+                    debugLogger.debug(
+                        "ALBUM_ART",
+                        "Chunk progress",
+                        mapOf(
+                            "device" to device.address,
+                            "progress" to "${i + 1}/$totalChunks"
+                        )
+                    )
+                    _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
+                }
+                
+                delay(20) // Small delay between chunks to avoid overwhelming the connection
+            }
+            
+            // Send end notification
+            val endMsg = AlbumArtEnd(checksum = checksum, success = true)
+            val endData = gson.toJson(endMsg).toByteArray()
+            sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, endData)
+            
+            Log.d(TAG, "Album art transfer completed to ${device.address}")
+            
+            debugLogger.info(
+                "ALBUM_ART",
+                "Album art transfer completed",
+                mapOf("device" to device.address, "checksum" to checksum)
+            )
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during album art transfer", e)
+            
+            debugLogger.error(
+                "ERROR",
+                "Album art transfer failed: ${e.message}",
+                mapOf("device" to device.address)
+            )
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
+            
+            // Send failure notification
+            try {
+                val endMsg = AlbumArtEnd(checksum = checksum, success = false)
+                val endData = gson.toJson(endMsg).toByteArray()
+                sendNotificationToDevice(device, BleConstants.ALBUM_ART_TX_CHAR_UUID, endData)
+            } catch (e2: Exception) {
+                Log.e(TAG, "Failed to send error notification", e2)
+            }
+        }
     }
     
     private fun updateConnectionStatus() {
         _connectionStatus.value = when (connectedDevices.size) {
-            0 -> if (isAdvertising) "Advertising" else "Disconnected"
-            1 -> "Connected to ${connectedDevices.values.first().device.name ?: connectedDevices.values.first().device.address}"
+            0 -> if (advertiser != null) "Advertising" else "Disconnected"
+            1 -> "Connected to ${connectedDevices.values.first().device.name ?: "Unknown"}"
             else -> "Connected to ${connectedDevices.size} devices"
         }
+    }
+    
+    fun hasConnectedDevices(): Boolean {
+        return connectedDevices.isNotEmpty()
     }
     
     private fun updateConnectedDevicesList() {
@@ -598,184 +880,33 @@ class EnhancedBleServerManager(
                 address = context.device.address,
                 name = context.device.name ?: "Unknown Device",
                 mtu = context.mtu,
+                connectionDuration = System.currentTimeMillis() - context.connectionTime,
                 subscriptions = context.subscriptions.map { uuid ->
                     when (uuid) {
                         BleConstants.STATE_TX_CHAR_UUID.toString() -> "State Updates"
-                        BleConstants.DEBUG_LOG_CHAR_UUID.toString() -> "Debug Logs"
                         BleConstants.ALBUM_ART_TX_CHAR_UUID.toString() -> "Album Art"
-                        else -> uuid
+                        else -> "Unknown"
                     }
-                },
-                connectionDuration = System.currentTimeMillis() - context.connectionTime
+                }
             )
         }
         _connectedDevicesList.value = devices
     }
     
-    fun sendAlbumArtFromMetadata(metadata: android.media.MediaMetadata?, trackId: String) {
-        CoroutineScope(Dispatchers.IO).launch {
-            albumArtManager.extractAlbumArt(metadata)?.let { (artData, checksum) ->
-                sendAlbumArt(artData, checksum, trackId)
-            } ?: run {
-                debugLogger.info(
-                    DebugLogger.LogType.NOTIFICATION_SENT,
-                    "No album art available for track",
-                    mapOf("track_id" to trackId)
-                )
-            }
-        }
-    }
-    
-    fun sendAlbumArt(albumArtData: ByteArray, checksum: String, trackId: String) {
-        CoroutineScope(Dispatchers.IO).launch {
-            // Cancel any existing transfer for this device
-            albumArtTransferJobs.values.forEach { it.cancel() }
-            albumArtTransferJobs.clear()
-            
-            // Send to all connected devices that have subscribed to album art
-            connectedDevices.values.forEach { context ->
-                if (context.subscriptions.contains(BleConstants.ALBUM_ART_TX_CHAR_UUID.toString())) {
-                    val job = launch {
-                        sendAlbumArtToDevice(context.device, albumArtData, checksum, trackId)
-                    }
-                    albumArtTransferJobs[context.device.address] = job
-                }
-            }
-        }
-    }
-    
-    private suspend fun sendAlbumArtToDevice(device: BluetoothDevice, data: ByteArray, checksum: String, trackId: String) {
-        try {
-            val mtu = connectedDevices[device.address]?.mtu ?: BleConstants.DEFAULT_MTU
-            val chunkSize = minOf(BleConstants.ALBUM_ART_CHUNK_SIZE, mtu - BleConstants.MTU_HEADER_SIZE)
-            val totalChunks = (data.size + chunkSize - 1) / chunkSize
-            
-            debugLogger.info(
-                DebugLogger.LogType.NOTIFICATION_SENT,
-                "Starting album art transfer",
-                mapOf(
-                    "device" to device.address,
-                    "size" to data.size,
-                    "chunks" to totalChunks,
-                    "chunk_size" to chunkSize,
-                    "track_id" to trackId
-                )
-            )
-            
-            // Send start message
-            val startMsg = AlbumArtStart(
-                size = data.size,
-                track_id = trackId,
-                checksum = checksum
-            )
-            sendNotification(device, BleConstants.STATE_TX_CHAR_UUID, gson.toJson(startMsg))
-            
-            // Small delay to ensure start message is processed
-            delay(50)
-            
-            // Send chunks
-            var offset = 0
-            var chunkIndex = 0
-            
-            while (offset < data.size && coroutineContext.isActive) {
-                val remainingBytes = data.size - offset
-                val currentChunkSize = minOf(chunkSize, remainingBytes)
-                val chunk = data.sliceArray(offset until offset + currentChunkSize)
-                
-                // Send raw bytes on album art characteristic
-                sendRawNotification(device, BleConstants.ALBUM_ART_TX_CHAR_UUID, chunk)
-                
-                debugLogger.verbose(
-                    DebugLogger.LogType.NOTIFICATION_SENT,
-                    "Sent album art chunk",
-                    mapOf(
-                        "chunk" to chunkIndex,
-                        "size" to currentChunkSize,
-                        "offset" to offset
-                    )
-                )
-                
-                offset += currentChunkSize
-                chunkIndex++
-                
-                // Small delay between chunks to avoid overwhelming the receiver
-                delay(20)
-            }
-            
-            // Send end message
-            val endMsg = AlbumArtEnd(
-                track_id = trackId,
-                checksum = checksum,
-                total_chunks = chunkIndex
-            )
-            sendNotification(device, BleConstants.STATE_TX_CHAR_UUID, gson.toJson(endMsg))
-            
-            debugLogger.info(
-                DebugLogger.LogType.NOTIFICATION_SENT,
-                "Album art transfer completed",
-                mapOf(
-                    "device" to device.address,
-                    "total_chunks" to chunkIndex,
-                    "track_id" to trackId
-                )
-            )
-            
-        } catch (e: Exception) {
-            debugLogger.error(
-                DebugLogger.LogType.ERROR,
-                "Album art transfer failed",
-                mapOf(
-                    "device" to device.address,
-                    "error" to e.message,
-                    "track_id" to trackId
-                )
-            )
-        }
-    }
-    
-    private fun sendRawNotification(device: BluetoothDevice, characteristicUuid: UUID, data: ByteArray) {
-        val service = gattServer?.getService(BleConstants.NOCTURNE_SERVICE_UUID)
-        val characteristic = service?.getCharacteristic(characteristicUuid)
-        
-        characteristic?.let { char ->
-            char.value = data
-            val success = gattServer?.notifyCharacteristicChanged(device, char, false) ?: false
-            
-            if (!success) {
-                debugLogger.warning(
-                    DebugLogger.LogType.ERROR,
-                    "Failed to send raw notification",
-                    mapOf(
-                        "device" to device.address,
-                        "characteristic" to characteristicUuid.toString(),
-                        "size" to data.size
-                    )
-                )
-            }
-        }
-    }
-    
     fun stopServer() {
-        debugLogger.info(DebugLogger.LogType.INITIALIZATION, "Stopping BLE server")
+        debugLogger.info("SERVER_STATE", "Stopping BLE server")
+        CoroutineScope(Dispatchers.IO).launch {
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+        }
         
-        // Cancel all album art transfers
+        advertiser?.stopAdvertising(advertiseCallback)
+        gattServer?.close()
+        connectedDevices.clear()
         albumArtTransferJobs.values.forEach { it.cancel() }
         albumArtTransferJobs.clear()
-        
-        stopAdvertising()
-        gattServer?.close()
-        gattServer = null
-        connectedDevices.clear()
-        
-        _connectionStatus.value = "Stopped"
+        _connectionStatus.value = "Disconnected"
         _connectedDevicesList.value = emptyList()
-    }
-    
-    fun getDebugLogs(count: Int = 100): List<DebugLogger.DebugLogEntry> {
-        return debugLogger.getRecentLogs(count)
-    }
-    
-    fun clearDebugLogs() {
-        debugLogger.clearLogs()
+        
+        Log.d(TAG, "BLE server stopped")
     }
 }

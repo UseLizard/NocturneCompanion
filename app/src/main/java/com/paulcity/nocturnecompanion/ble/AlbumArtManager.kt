@@ -15,8 +15,6 @@ class AlbumArtManager {
     companion object {
         private const val TAG = "AlbumArtManager"
         private const val CACHE_SIZE = 10 * 1024 * 1024 // 10MB cache
-        private const val WEBP_QUALITY = 80 // WebP quality (0-100)
-        private const val TARGET_SIZE = 300 // Target size for square album art
     }
     
     // LRU cache for compressed album art
@@ -24,6 +22,10 @@ class AlbumArtManager {
         override fun sizeOf(key: String, value: CachedAlbumArt): Int {
             return value.data.size
         }
+    }
+
+    fun getArtFromCache(cacheKey: String): CachedAlbumArt? {
+        return albumArtCache.get(cacheKey)
     }
     
     data class CachedAlbumArt(
@@ -78,18 +80,18 @@ class AlbumArtManager {
         
         try {
             // Create square 300x300 bitmap
-            val squareBitmap = createSquareBitmap(bitmap, TARGET_SIZE)
+            val squareBitmap = createSquareBitmap(bitmap, BleConstants.ALBUM_ART_TARGET_SIZE)
             Log.d(TAG, "Square bitmap size: ${squareBitmap.width}x${squareBitmap.height}")
             
             // Compress to WebP
             val outputStream = ByteArrayOutputStream()
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                 // Use lossy WebP for better compression on Android 11+
-                squareBitmap.compress(Bitmap.CompressFormat.WEBP_LOSSY, WEBP_QUALITY, outputStream)
+                squareBitmap.compress(Bitmap.CompressFormat.WEBP_LOSSY, BleConstants.ALBUM_ART_WEBP_QUALITY, outputStream)
             } else {
                 // Fallback to standard WebP on older versions
                 @Suppress("DEPRECATION")
-                squareBitmap.compress(Bitmap.CompressFormat.WEBP, WEBP_QUALITY, outputStream)
+                squareBitmap.compress(Bitmap.CompressFormat.WEBP, BleConstants.ALBUM_ART_WEBP_QUALITY, outputStream)
             }
             val webpData = outputStream.toByteArray()
             
@@ -140,10 +142,10 @@ class AlbumArtManager {
     }
     
     /**
-     * Calculate MD5 checksum for data integrity verification
+     * Calculate SHA-256 checksum for data integrity verification
      */
     private fun calculateChecksum(data: ByteArray): String {
-        val md = MessageDigest.getInstance("MD5")
+        val md = MessageDigest.getInstance("SHA-256")
         val digest = md.digest(data)
         return digest.joinToString("") { "%02x".format(it) }
     }

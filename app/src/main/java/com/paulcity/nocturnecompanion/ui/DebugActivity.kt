@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.*
+import android.content.ComponentName
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -34,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -47,13 +49,19 @@ import com.google.gson.reflect.TypeToken
 import com.paulcity.nocturnecompanion.ble.DebugLogger
 import com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager
 import com.paulcity.nocturnecompanion.ble.BleConstants
+import com.paulcity.nocturnecompanion.ble.MediaStoreAlbumArtManager
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import com.paulcity.nocturnecompanion.services.NocturneServiceBLE
 import com.paulcity.nocturnecompanion.ui.theme.NocturneCompanionTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import java.text.SimpleDateFormat
 import java.util.*
+import android.media.session.MediaSessionManager
+import android.media.MediaMetadata
 
 @SuppressLint("MissingPermission")
 class DebugActivity : ComponentActivity() {
@@ -61,6 +69,9 @@ class DebugActivity : ComponentActivity() {
     private lateinit var bluetoothAdapter: BluetoothAdapter
     private var isReceiverRegistered = false
     private val gson = Gson()
+    private val serviceJob = Job()
+    private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
+    private lateinit var mediaStoreAlbumArtManager: MediaStoreAlbumArtManager
     
     // State variables
     private val serverStatus = mutableStateOf("Disconnected")
@@ -69,6 +80,16 @@ class DebugActivity : ComponentActivity() {
     private val debugLogs = mutableStateListOf<DebugLogger.DebugLogEntry>()
     private val lastCommand = mutableStateOf<String?>(null)
     private val lastStateUpdate = mutableStateOf<StateUpdate?>(null)
+    private val albumArtInfo = mutableStateOf<AlbumArtInfo?>(null)
+    
+    data class AlbumArtInfo(
+        val hasArt: Boolean,
+        val checksum: String? = null,
+        val size: Int = 0,
+        val lastQuery: String? = null,
+        val lastTransferTime: Long? = null,
+        val bitmap: android.graphics.Bitmap? = null
+    )
     
     // UI state
     private val selectedTab = mutableStateOf(0)
@@ -95,6 +116,47 @@ class DebugActivity : ComponentActivity() {
                     val json = intent.getStringExtra(NocturneServiceBLE.EXTRA_DEBUG_LOG) ?: return
                     val logEntry = gson.fromJson(json, DebugLogger.DebugLogEntry::class.java)
                     debugLogs.add(logEntry)
+                    
+                    // Track album art events
+                    when {
+                        logEntry.message.contains("album_art_query") -> {
+                            // Parse the query to get checksum
+                            try {
+                                val queryData = JsonParser.parseString(logEntry.data?.get("data") as? String ?: "{}")
+                                val checksum = queryData.asJsonObject.get("checksum")?.asString
+                                albumArtInfo.value = albumArtInfo.value?.copy(
+                                    lastQuery = checksum
+                                ) ?: AlbumArtInfo(false, lastQuery = checksum)
+                            } catch (e: Exception) {
+                                // Ignore parse errors
+                            }
+                        }
+                        logEntry.message.contains("album_art_start") -> {
+                            try {
+                                val data = JsonParser.parseString(logEntry.data?.get("data") as? String ?: "{}")
+                                val size = data.asJsonObject.get("size")?.asInt ?: 0
+                                val checksum = data.asJsonObject.get("checksum")?.asString
+                                albumArtInfo.value = AlbumArtInfo(
+                                    hasArt = true,
+                                    checksum = checksum,
+                                    size = size,
+                                    lastQuery = albumArtInfo.value?.lastQuery,
+                                    lastTransferTime = System.currentTimeMillis()
+                                )
+                            } catch (e: Exception) {
+                                // Ignore parse errors
+                            }
+                        }
+                        logEntry.message.contains("album_art_end") -> {
+                            albumArtInfo.value = albumArtInfo.value?.copy(
+                                lastTransferTime = System.currentTimeMillis()
+                            )
+                        }
+                        logEntry.message.contains("No album art available") -> {
+                            albumArtInfo.value = AlbumArtInfo(hasArt = false)
+                        }
+                    }
+                    
                     // Keep only last 500 logs
                     while (debugLogs.size > 500) {
                         debugLogs.removeAt(0)
@@ -106,6 +168,11 @@ class DebugActivity : ComponentActivity() {
                 NocturneServiceBLE.ACTION_STATE_UPDATED -> {
                     val json = intent.getStringExtra(NocturneServiceBLE.EXTRA_JSON_DATA) ?: return
                     lastStateUpdate.value = gson.fromJson(json, StateUpdate::class.java)
+                    
+                    // Try to get album art when state updates
+                    serviceScope.launch {
+                        updateAlbumArtFromMediaSession()
+                    }
                 }
             }
         }
@@ -124,6 +191,7 @@ class DebugActivity : ComponentActivity() {
         
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
+        mediaStoreAlbumArtManager = MediaStoreAlbumArtManager(this)
         
         setContent {
             NocturneCompanionTheme {
@@ -683,6 +751,58 @@ class DebugActivity : ComponentActivity() {
                         StateRow("Playing", if (state.is_playing) "Yes" else "No")
                         StateRow("Position", "${state.position_ms / 1000}s / ${state.duration_ms / 1000}s")
                         StateRow("Volume", "${state.volume_percent}%")
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        // Album Art Section
+                        Text(
+                            text = "Album Art Status",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        albumArtInfo.value?.let { artInfo ->
+                            // Display album art image if available
+                            artInfo.bitmap?.let { bitmap ->
+                                androidx.compose.foundation.Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = "Album Art",
+                                    modifier = Modifier
+                                        .size(120.dp)
+                                        .padding(8.dp)
+                                        .background(
+                                            color = MaterialTheme.colorScheme.surfaceVariant,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                        .border(
+                                            width = 1.dp,
+                                            color = MaterialTheme.colorScheme.outline,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                )
+                                
+                                Spacer(modifier = Modifier.height(8.dp))
+                            }
+                            
+                            StateRow("Has Album Art", if (artInfo.hasArt) "Yes" else "No")
+                            artInfo.checksum?.let { StateRow("Checksum", it.take(16) + "...") }
+                            if (artInfo.size > 0) StateRow("Size", "${artInfo.size / 1024} KB")
+                            artInfo.lastQuery?.let { StateRow("Last Query", it.take(16) + "...") }
+                            artInfo.lastTransferTime?.let { 
+                                val timeAgo = (System.currentTimeMillis() - it) / 1000
+                                StateRow("Last Transfer", "${timeAgo}s ago")
+                            }
+                        } ?: run {
+                            Text(
+                                text = "No album art data yet",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     } ?: run {
                         Text(
                             text = "No state updates yet",
@@ -726,6 +846,9 @@ class DebugActivity : ComponentActivity() {
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+            permissions.add(Manifest.permission.READ_MEDIA_AUDIO)
+        } else {
+            permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
         
         if (permissions.isNotEmpty()) {
@@ -754,5 +877,65 @@ class DebugActivity : ComponentActivity() {
         } catch (e: Exception) {
             json
         }
+    }
+    
+    private suspend fun updateAlbumArtFromMediaSession() {
+        try {
+            // Use the current state update to get artist/album info
+            val state = lastStateUpdate.value ?: return
+            
+            // Try to get album art using MediaStore
+            val albumArtResult = mediaStoreAlbumArtManager.getAlbumArtFromMediaStore(
+                artist = state.artist,
+                album = state.album,
+                title = state.track
+            )
+            
+            if (albumArtResult != null) {
+                val (artData, checksum) = albumArtResult
+                // Convert WebP data back to bitmap for display
+                val bitmap = android.graphics.BitmapFactory.decodeByteArray(artData, 0, artData.size)
+                
+                albumArtInfo.value = AlbumArtInfo(
+                    hasArt = true,
+                    checksum = checksum,
+                    size = artData.size,
+                    bitmap = bitmap,
+                    lastTransferTime = albumArtInfo.value?.lastTransferTime
+                )
+                
+                Log.d("DebugActivity", "Album art loaded from MediaStore: ${artData.size} bytes")
+            } else {
+                // Try MediaSession as fallback
+                val mediaSessionManager = getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+                val controllers = mediaSessionManager.getActiveSessions(ComponentName(this, com.paulcity.nocturnecompanion.services.NocturneNotificationListener::class.java))
+                
+                if (controllers.isNotEmpty()) {
+                    val metadata = controllers[0].metadata
+                    if (metadata != null) {
+                        // Try to get album art bitmap
+                        val albumArt = metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                            ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)
+                            ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+                        
+                        if (albumArt != null) {
+                            albumArtInfo.value = AlbumArtInfo(
+                                hasArt = true,
+                                bitmap = albumArt,
+                                lastTransferTime = albumArtInfo.value?.lastTransferTime
+                            )
+                            Log.d("DebugActivity", "Album art loaded from MediaSession")
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("DebugActivity", "Error getting album art", e)
+        }
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        serviceJob.cancel()
     }
 }

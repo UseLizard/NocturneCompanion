@@ -4,7 +4,8 @@ package com.paulcity.nocturnecompanion.data
 data class Command(
     val command: String,
     val value_ms: Long? = null,
-    val value_percent: Int? = null
+    val value_percent: Int? = null,
+    val payload: Map<String, Any>? = null
 )
 
 // Android -> Nocturne
