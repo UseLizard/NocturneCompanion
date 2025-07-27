@@ -16,7 +16,6 @@ import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
 import com.google.gson.Gson
 import com.paulcity.nocturnecompanion.data.Command
-import com.paulcity.nocturnecompanion.data.CommandAck
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -319,21 +318,6 @@ class EnhancedBleServerManager(
                     // Parse command
                     val command = gson.fromJson(jsonStr, Command::class.java)
                     
-                    // Send ACK if command has an ID
-                    if (!command.command_id.isNullOrEmpty()) {
-                        val ack = CommandAck(
-                            command_id = command.command_id,
-                            status = "received"
-                        )
-                        sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, gson.toJson(ack).toByteArray())
-                        
-                        debugLogger.debug(
-                            "ACK_SENT",
-                            "Sent ACK for command",
-                            mapOf("command_id" to command.command_id, "command" to command.command)
-                        )
-                    }
-                    
                     // Handle special commands
                     when (command.command) {
                         "album_art_needed" -> {
@@ -362,20 +346,9 @@ class EnhancedBleServerManager(
                         }
                     }
                     
-                    // Send success ACK after processing if command has an ID
-                    if (!command.command_id.isNullOrEmpty()) {
-                        val successAck = CommandAck(
-                            command_id = command.command_id,
-                            status = "success"
-                        )
-                        sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, gson.toJson(successAck).toByteArray())
-                        
-                        debugLogger.debug(
-                            "ACK_SENT",
-                            "Sent success ACK for command",
-                            mapOf("command_id" to command.command_id, "command" to command.command)
-                        )
-                    }
+                    // Success ACK removed - rely on state updates for confirmation
+                    // The "received" ACK is sufficient, and state updates provide
+                    // the actual confirmation that the command was executed
                     
                     CoroutineScope(Dispatchers.IO).launch {
                         _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)

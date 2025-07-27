@@ -55,6 +55,11 @@ class NocturneServiceBLE : Service() {
     private var stateUpdateRunnable: Runnable? = null
     private val STATE_UPDATE_DEBOUNCE_MS = 100L // 100ms debounce
     
+    // Polling handler for media state when callbacks might not fire
+    private val mediaPollingHandler = Handler(Looper.getMainLooper())
+    private var mediaPollingRunnable: Runnable? = null
+    private val MEDIA_POLL_INTERVAL_MS = 1000L // Poll every second when connected
+    
     private var currentMediaController: MediaController? = null
     private var lastTrackId: String? = null
     
@@ -235,6 +240,9 @@ class NocturneServiceBLE : Service() {
                     Log.d(TAG, "Sending initial media state to connected device")
                     sendStateUpdate()
                 }
+                
+                // Start polling media state when device connects
+                startMediaPolling()
             }
         )
         bleServerManager.startServer()
@@ -507,6 +515,56 @@ class NocturneServiceBLE : Service() {
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 
+    private fun startMediaPolling() {
+        Log.d(TAG, "Starting media state polling")
+        
+        // Cancel any existing polling
+        mediaPollingRunnable?.let {
+            mediaPollingHandler.removeCallbacks(it)
+        }
+        
+        mediaPollingRunnable = object : Runnable {
+            override fun run() {
+                // Only poll if we have connected devices
+                if (bleServerManager.hasConnectedDevices()) {
+                    currentMediaController?.let { controller ->
+                        // Manually check and update state
+                        controller.playbackState?.let { state ->
+                            val isPlaying = state.state == PlaybackState.STATE_PLAYING
+                            val position = state.position
+                            
+                            // Check if state actually changed
+                            if (lastState.is_playing != isPlaying || 
+                                kotlin.math.abs(lastState.position_ms - position) > 1000) {
+                                Log.d(TAG, "Polling detected state change - playing: $isPlaying, position: $position")
+                                lastState.is_playing = isPlaying
+                                lastState.position_ms = position
+                                sendStateUpdate()
+                            }
+                        }
+                    }
+                    
+                    // Schedule next poll
+                    mediaPollingHandler.postDelayed(this, MEDIA_POLL_INTERVAL_MS)
+                } else {
+                    Log.d(TAG, "No connected devices, stopping media polling")
+                    stopMediaPolling()
+                }
+            }
+        }
+        
+        // Start polling
+        mediaPollingHandler.post(mediaPollingRunnable!!)
+    }
+    
+    private fun stopMediaPolling() {
+        Log.d(TAG, "Stopping media state polling")
+        mediaPollingRunnable?.let {
+            mediaPollingHandler.removeCallbacks(it)
+        }
+        mediaPollingRunnable = null
+    }
+
     override fun onDestroy() {
         Log.d(TAG, "onDestroy() called")
         
@@ -524,6 +582,9 @@ class NocturneServiceBLE : Service() {
         stateUpdateRunnable?.let {
             stateUpdateHandler.removeCallbacks(it)
         }
+        
+        // Stop media polling
+        stopMediaPolling()
         
         serviceScope.cancel()
         currentMediaController?.unregisterCallback(mediaCallback)
