@@ -3,6 +3,7 @@ package com.paulcity.nocturnecompanion.data
 // Nocturne -> Android
 data class Command(
     val command: String,
+    val command_id: String? = null,
     val value_ms: Long? = null,
     val value_percent: Int? = null,
     val payload: Map<String, Any>? = null
@@ -18,4 +19,11 @@ data class StateUpdate(
     var position_ms: Long,
     var is_playing: Boolean,
     var volume_percent: Int
+)
+
+// Command acknowledgment
+data class CommandAck(
+    val type: String = "ack",
+    val command_id: String,
+    val status: String // "received" or "success"
 )

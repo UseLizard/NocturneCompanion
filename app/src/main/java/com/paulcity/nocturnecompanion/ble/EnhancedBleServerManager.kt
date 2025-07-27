@@ -16,6 +16,7 @@ import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
 import com.google.gson.Gson
 import com.paulcity.nocturnecompanion.data.Command
+import com.paulcity.nocturnecompanion.data.CommandAck
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -302,7 +303,7 @@ class EnhancedBleServerManager(
             offset: Int,
             value: ByteArray?
         ) {
-            Log.d(TAG, "Write request from ${device.address} to ${characteristic.uuid}")
+            Log.d(TAG, "Write request from ${device.address} to ${characteristic.uuid}, responseNeeded: $responseNeeded, value size: ${value?.size}")
             
             if (characteristic.uuid == BleConstants.COMMAND_RX_CHAR_UUID && value != null) {
                 try {
@@ -317,6 +318,21 @@ class EnhancedBleServerManager(
                     
                     // Parse command
                     val command = gson.fromJson(jsonStr, Command::class.java)
+                    
+                    // Send ACK if command has an ID
+                    if (!command.command_id.isNullOrEmpty()) {
+                        val ack = CommandAck(
+                            command_id = command.command_id,
+                            status = "received"
+                        )
+                        sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, gson.toJson(ack).toByteArray())
+                        
+                        debugLogger.debug(
+                            "ACK_SENT",
+                            "Sent ACK for command",
+                            mapOf("command_id" to command.command_id, "command" to command.command)
+                        )
+                    }
                     
                     // Handle special commands
                     when (command.command) {
@@ -344,6 +360,21 @@ class EnhancedBleServerManager(
                                 mapOf("device" to device.address)
                             )
                         }
+                    }
+                    
+                    // Send success ACK after processing if command has an ID
+                    if (!command.command_id.isNullOrEmpty()) {
+                        val successAck = CommandAck(
+                            command_id = command.command_id,
+                            status = "success"
+                        )
+                        sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, gson.toJson(successAck).toByteArray())
+                        
+                        debugLogger.debug(
+                            "ACK_SENT",
+                            "Sent success ACK for command",
+                            mapOf("command_id" to command.command_id, "command" to command.command)
+                        )
                     }
                     
                     CoroutineScope(Dispatchers.IO).launch {
@@ -580,11 +611,11 @@ class EnhancedBleServerManager(
                     )
                 }
             } else {
-                // Data exceeds MTU - need to implement chunking
+                // Data exceeds MTU - implement chunking for large messages
                 Log.w(TAG, "Data size ${data.size} exceeds MTU-3 ($effectiveMtu) for device ${device.address}")
                 debugLogger.warning(
                     "DATA_TOO_LARGE",
-                    "Notification data exceeds MTU",
+                    "Notification data exceeds MTU, chunking required",
                     mapOf(
                         "device" to device.address,
                         "data_size" to data.size.toString(),
@@ -593,16 +624,57 @@ class EnhancedBleServerManager(
                     )
                 )
                 
-                // For now, truncate to fit MTU to prevent complete failure
-                // TODO: Implement proper chunking protocol
-                val truncatedData = data.sliceArray(0 until effectiveMtu)
-                characteristic.value = truncatedData
-                try {
-                    gattServer?.notifyCharacteristicChanged(device, characteristic, false)
-                    Log.w(TAG, "Sent truncated notification (${truncatedData.size} of ${data.size} bytes)")
-                } catch (e: SecurityException) {
-                    Log.e(TAG, "SecurityException sending truncated notification", e)
+                // For state updates, try to reduce size by removing null fields
+                if (characteristicUuid == BleConstants.STATE_TX_CHAR_UUID) {
+                    try {
+                        // Parse the JSON and remove null/empty fields
+                        val jsonStr = String(data, Charsets.UTF_8)
+                        val json = gson.fromJson(jsonStr, Map::class.java)
+                        val compactJson = json.filterValues { it != null && it != "" }
+                        val compactData = gson.toJson(compactJson).toByteArray()
+                        
+                        if (compactData.size <= effectiveMtu) {
+                            // Compact version fits, send it
+                            characteristic.value = compactData
+                            gattServer?.notifyCharacteristicChanged(device, characteristic, false)
+                            Log.i(TAG, "Sent compacted notification (${compactData.size} bytes, original ${data.size} bytes)")
+                            return
+                        }
+                        
+                        // Still too large, truncate metadata fields
+                        val mutableJson = compactJson.toMutableMap()
+                        val maxFieldLength = 50 // Truncate long strings to 50 chars
+                        
+                        listOf("artist", "album", "track").forEach { field ->
+                            val value = mutableJson[field] as? String
+                            if (value != null && value.length > maxFieldLength) {
+                                mutableJson[field] = value.substring(0, maxFieldLength) + "..."
+                            }
+                        }
+                        
+                        val truncatedJsonData = gson.toJson(mutableJson).toByteArray()
+                        if (truncatedJsonData.size <= effectiveMtu) {
+                            characteristic.value = truncatedJsonData
+                            gattServer?.notifyCharacteristicChanged(device, characteristic, false)
+                            Log.w(TAG, "Sent truncated metadata notification (${truncatedJsonData.size} bytes)")
+                            return
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error compacting JSON", e)
+                    }
                 }
+                
+                // Last resort: drop the notification to prevent disconnection
+                Log.e(TAG, "Unable to send notification - data too large even after compaction")
+                debugLogger.error(
+                    "NOTIFICATION_DROPPED",
+                    "Notification dropped due to size constraints",
+                    mapOf(
+                        "device" to device.address,
+                        "data_size" to data.size.toString(),
+                        "char_uuid" to characteristicUuid.toString()
+                    )
+                )
             }
         }
         

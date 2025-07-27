@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.MediaMetadata
@@ -18,6 +20,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.gson.Gson
+import com.paulcity.nocturnecompanion.services.AlbumArtManager
 import com.paulcity.nocturnecompanion.data.Command
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager
@@ -36,9 +39,63 @@ class NocturneService : Service() {
    private val testingMode = true 
 
    private var currentMediaController: MediaController? = null
+   private var lastTrackId: String? = null
+   
+   // Debug broadcast receiver
+   private val debugReceiver = object : BroadcastReceiver() {
+       override fun onReceive(context: Context?, intent: Intent?) {
+           when (intent?.action) {
+               ACTION_DEBUG_STATE_UPDATE -> {
+                   val jsonData = intent.getStringExtra(EXTRA_JSON_DATA)
+                   if (jsonData != null) {
+                       try {
+                           val stateUpdate = gson.fromJson(jsonData, StateUpdate::class.java)
+                           Log.d("NocturneService", "Debug state update received: $stateUpdate")
+                           
+                           // Send the state update via BLE
+                           serviceScope.launch {
+                               if (::bleServerManager.isInitialized) {
+                                   bleServerManager.sendStateUpdate(stateUpdate)
+                                   Log.d("NocturneService", "Sent debug state update via BLE")
+                               }
+                           }
+                       } catch (e: Exception) {
+                           Log.e("NocturneService", "Failed to process debug state update", e)
+                       }
+                   }
+               }
+               ACTION_DEBUG_TIME_SYNC -> {
+                   val jsonData = intent.getStringExtra(EXTRA_JSON_DATA)
+                   if (jsonData != null) {
+                       try {
+                           // Parse the JSON data to an object that can be sent
+                           val timeSyncData = gson.fromJson(jsonData, Map::class.java)
+                           Log.d("NocturneService", "Debug time sync received: $timeSyncData")
+                           
+                           // Send time sync via BLE using sendStateUpdate which handles any data type
+                           serviceScope.launch {
+                               if (::bleServerManager.isInitialized) {
+                                   bleServerManager.sendStateUpdate(timeSyncData)
+                                   Log.d("NocturneService", "Sent time sync via BLE")
+                               }
+                           }
+                       } catch (e: Exception) {
+                           Log.e("NocturneService", "Failed to process debug time sync", e)
+                       }
+                   }
+               }
+           }
+       }
+   }
+   
    private val mediaCallback = object : MediaController.Callback() {
        override fun onMetadataChanged(metadata: MediaMetadata?) {
            Log.d("NocturneService", "Media metadata changed for ${currentMediaController?.packageName}")
+           
+           val newTrackId = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)
+           val trackChanged = newTrackId != lastTrackId
+           lastTrackId = newTrackId
+           
            lastState.artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST)
            lastState.album = metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM)
            lastState.track = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)
@@ -55,13 +112,21 @@ class NocturneService : Service() {
                }
            }
            
-           sendStateUpdate()
+           // Send full state update on track change
+           if (trackChanged) {
+               Log.d("NocturneService", "Track changed, sending full state update")
+               sendStateUpdate()
+           }
        }
 
        override fun onPlaybackStateChanged(state: PlaybackState?) {
            Log.d("NocturneService", "Playback state changed for ${currentMediaController?.packageName}")
            lastState.is_playing = state?.state == PlaybackState.STATE_PLAYING
            lastState.position_ms = state?.position ?: 0
+           
+           // Periodic updates are handled by startPeriodicStateUpdates()
+           
+           // Send immediate update for play/pause changes
            sendStateUpdate()
        }
    }
@@ -88,6 +153,8 @@ class NocturneService : Service() {
        const val ACTION_SERVER_STATUS = "com.paulcity.nocturnecompanion.SERVER_STATUS"
        const val ACTION_NOTIFICATION = "com.paulcity.nocturnecompanion.NOTIFICATION"
        const val ACTION_UPLOAD_ALBUM_ART = "com.paulcity.nocturnecompanion.UPLOAD_ALBUM_ART"
+       const val ACTION_DEBUG_STATE_UPDATE = "com.paulcity.nocturnecompanion.DEBUG_STATE_UPDATE"
+       const val ACTION_DEBUG_TIME_SYNC = "com.paulcity.nocturnecompanion.DEBUG_TIME_SYNC"
        const val EXTRA_JSON_DATA = "json_data"
        const val EXTRA_SERVER_STATUS = "server_status"
        const val EXTRA_IS_RUNNING = "is_running"
@@ -115,6 +182,15 @@ class NocturneService : Service() {
            
            startForeground(NOTIFICATION_ID, createNotification("Initializing..."))
            Log.d("NocturneService", "Started foreground service")
+           
+           // Register debug receiver
+           val debugFilter = IntentFilter().apply {
+               addAction(ACTION_DEBUG_STATE_UPDATE)
+               addAction(ACTION_DEBUG_TIME_SYNC)
+           }
+           registerReceiver(debugReceiver, debugFilter)
+           Log.d("NocturneService", "Debug receiver registered")
+           
            broadcastNotification("Service created and foreground notification started")
        } catch (e: Exception) {
            Log.e("NocturneService", "Error in onCreate()", e)
@@ -551,6 +627,14 @@ class NocturneService : Service() {
 
    override fun onDestroy() {
        super.onDestroy()
+       
+       // Unregister debug receiver
+       try {
+           unregisterReceiver(debugReceiver)
+           Log.d("NocturneService", "Debug receiver unregistered")
+       } catch (e: Exception) {
+           Log.w("NocturneService", "Failed to unregister debug receiver", e)
+       }
        
        // Broadcast that servers are stopping
        broadcastNotification("Service shutting down - BLE and SPP servers stopped")

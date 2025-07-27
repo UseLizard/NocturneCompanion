@@ -50,6 +50,11 @@ class NocturneServiceBLE : Service() {
         }
     }
     
+    // Debounce handler for state updates
+    private val stateUpdateHandler = Handler(Looper.getMainLooper())
+    private var stateUpdateRunnable: Runnable? = null
+    private val STATE_UPDATE_DEBOUNCE_MS = 100L // 100ms debounce
+    
     private var currentMediaController: MediaController? = null
     private var lastTrackId: String? = null
     
@@ -171,6 +176,7 @@ class NocturneServiceBLE : Service() {
                 ACTION_STOP -> {
                     Log.d(TAG, "Stopping service")
                     stopSelf()
+                    return START_NOT_STICKY // Don't restart when stopped intentionally
                 }
                 else -> {
                     Log.w(TAG, "Unknown action: ${intent?.action}")
@@ -222,6 +228,13 @@ class NocturneServiceBLE : Service() {
                 // Send time sync when device connects
                 Log.d(TAG, "Device connected, sending time sync")
                 sendTimeSync()
+                
+                // Send current media state after a short delay
+                serviceScope.launch {
+                    delay(500) // Give time for notifications to be enabled
+                    Log.d(TAG, "Sending initial media state to connected device")
+                    sendStateUpdate()
+                }
             }
         )
         bleServerManager.startServer()
@@ -283,6 +296,11 @@ class NocturneServiceBLE : Service() {
 
     private fun observeMediaControllers() {
         serviceScope.launch {
+            // Check if we have an active controller immediately
+            if (NocturneNotificationListener.activeMediaController.value == null) {
+                Log.w(TAG, "No active media controller available at startup")
+            }
+            
             NocturneNotificationListener.activeMediaController.collectLatest { controller ->
                 if (controller?.packageName != currentMediaController?.packageName) {
                     Log.i(TAG, "Media controller changed from ${currentMediaController?.packageName} to ${controller?.packageName}")
@@ -296,6 +314,8 @@ class NocturneServiceBLE : Service() {
                     
                     // Update state immediately
                     updateMediaState(controller)
+                } else if (controller == null) {
+                    Log.w(TAG, "Media controller became null")
                 }
             }
         }
@@ -372,22 +392,33 @@ class NocturneServiceBLE : Service() {
     }
 
     private fun sendStateUpdate() {
-        serviceScope.launch {
-            try {
-                // Send via BLE
-                bleServerManager.sendStateUpdate(lastState)
-                
-                // Broadcast locally
-                val intent = Intent(ACTION_STATE_UPDATED)
-                intent.putExtra(EXTRA_JSON_DATA, gson.toJson(lastState))
-                sendBroadcastCompat(intent)
-                
-                Log.d(TAG, "State update sent: ${lastState.track} - playing: ${lastState.is_playing}")
-                
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to send state update", e)
+        // Cancel any pending state update
+        stateUpdateRunnable?.let { 
+            stateUpdateHandler.removeCallbacks(it)
+        }
+        
+        // Schedule new state update with debounce
+        stateUpdateRunnable = Runnable {
+            serviceScope.launch {
+                try {
+                    // Send via BLE
+                    bleServerManager.sendStateUpdate(lastState)
+                    
+                    // Broadcast locally
+                    val intent = Intent(ACTION_STATE_UPDATED)
+                    intent.putExtra(EXTRA_JSON_DATA, gson.toJson(lastState))
+                    sendBroadcastCompat(intent)
+                    
+                    Log.d(TAG, "State update sent: ${lastState.track} - playing: ${lastState.is_playing}")
+                    
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to send state update", e)
+                }
             }
         }
+        
+        // Post with debounce delay
+        stateUpdateHandler.postDelayed(stateUpdateRunnable!!, STATE_UPDATE_DEBOUNCE_MS)
     }
     
     private fun sendTimeSync() {
@@ -479,9 +510,20 @@ class NocturneServiceBLE : Service() {
     override fun onDestroy() {
         Log.d(TAG, "onDestroy() called")
         
+        // Send broadcast that service is stopping
+        val intent = Intent(ACTION_SERVER_STATUS)
+        intent.putExtra(EXTRA_SERVER_STATUS, "Stopped")
+        intent.putExtra(EXTRA_IS_RUNNING, false)
+        sendBroadcastCompat(intent)
+        
         // Stop periodic time sync
         timeSyncHandler.removeCallbacks(timeSyncRunnable)
         Log.d(TAG, "Stopped periodic time sync")
+        
+        // Cancel any pending state updates
+        stateUpdateRunnable?.let {
+            stateUpdateHandler.removeCallbacks(it)
+        }
         
         serviceScope.cancel()
         currentMediaController?.unregisterCallback(mediaCallback)

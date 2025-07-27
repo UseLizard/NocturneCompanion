@@ -52,6 +52,7 @@ import com.paulcity.nocturnecompanion.ble.BleConstants
 import com.paulcity.nocturnecompanion.ble.MediaStoreAlbumArtManager
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import com.paulcity.nocturnecompanion.services.NocturneServiceBLE
+import com.paulcity.nocturnecompanion.services.NocturneService
 import com.paulcity.nocturnecompanion.ui.theme.NocturneCompanionTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -65,6 +66,14 @@ import android.media.MediaMetadata
 
 @SuppressLint("MissingPermission")
 class DebugActivity : ComponentActivity() {
+
+    companion object {
+        private const val TAG = "DebugActivity"
+        private const val ACTION_SEND_BLE_STATE = "com.paulcity.nocturnecompanion.SEND_BLE_STATE"
+        private const val ACTION_SEND_BLE_TIME_SYNC = "com.paulcity.nocturnecompanion.SEND_BLE_TIME_SYNC"
+        private const val EXTRA_STATE_UPDATE = "state_update"
+        private const val EXTRA_TIME_SYNC = "time_sync"
+    }
 
     private lateinit var bluetoothAdapter: BluetoothAdapter
     private var isReceiverRegistered = false
@@ -317,6 +326,11 @@ class DebugActivity : ComponentActivity() {
                         onClick = { selectedTab.value = 3 },
                         text = { Text("State") }
                     )
+                    Tab(
+                        selected = selectedTab.value == 4,
+                        onClick = { selectedTab.value = 4 },
+                        text = { Text("Playback") }
+                    )
                 }
                 
                 // Content
@@ -325,6 +339,7 @@ class DebugActivity : ComponentActivity() {
                     1 -> LogsTab()
                     2 -> CommandsTab()
                     3 -> StateTab()
+                    4 -> PlaybackTab()
                 }
             }
         }
@@ -835,6 +850,210 @@ class DebugActivity : ComponentActivity() {
             )
         }
     }
+    
+    @Composable
+    fun PlaybackTab() {
+        // Track current playback state
+        var currentPosition by remember { mutableStateOf(0L) }
+        var isPlaying by remember { mutableStateOf(false) }
+        
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            // Playback State Controls
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        text = "Playback State Controls",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    // Play/Pause buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                isPlaying = true
+                                sendPlaybackStateUpdate(true, currentPosition)
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = !isPlaying
+                        ) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = null)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Play")
+                        }
+                        
+                        Button(
+                            onClick = {
+                                isPlaying = false
+                                sendPlaybackStateUpdate(false, currentPosition)
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = isPlaying
+                        ) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Pause")
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    Text(
+                        text = "Status: ${if (isPlaying) "Playing" else "Paused"}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (isPlaying) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // Position/Seek Controls
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        text = "Position Controls",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Text("Current Position: ${currentPosition / 1000}s")
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    // Quick position buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                currentPosition = 0
+                                sendPlaybackStateUpdate(isPlaying, 0)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("0s")
+                        }
+                        
+                        Button(
+                            onClick = {
+                                currentPosition = 30000
+                                sendPlaybackStateUpdate(isPlaying, 30000)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("30s")
+                        }
+                        
+                        Button(
+                            onClick = {
+                                currentPosition = 60000
+                                sendPlaybackStateUpdate(isPlaying, 60000)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("1m")
+                        }
+                        
+                        Button(
+                            onClick = {
+                                currentPosition = 300000
+                                sendPlaybackStateUpdate(isPlaying, 300000)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("5m")
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // Custom position slider
+                    Slider(
+                        value = currentPosition.toFloat(),
+                        onValueChange = { currentPosition = it.toLong() },
+                        valueRange = 0f..600000f, // 0 to 10 minutes
+                        modifier = Modifier.fillMaxWidth(),
+                        onValueChangeFinished = {
+                            sendPlaybackStateUpdate(isPlaying, currentPosition)
+                        }
+                    )
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // System Controls
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        text = "System Controls",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    // Time Sync Button
+                    Button(
+                        onClick = { sendTimeSync() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Send Time Sync")
+                    }
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // Send Full State Button (with test data)
+                    Button(
+                        onClick = { 
+                            sendFullStateUpdate(
+                                isPlaying = isPlaying,
+                                positionMs = currentPosition,
+                                durationMs = 300000, // 5 min
+                                artist = "Debug Artist",
+                                album = "Debug Album",
+                                track = "Debug Track",
+                                volumePercent = 75
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Send, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Send Full State (Test Data)")
+                    }
+                }
+            }
+        }
+    }
 
     private fun requestPermissionsAndStart() {
         val permissions = mutableListOf<String>()
@@ -877,6 +1096,174 @@ class DebugActivity : ComponentActivity() {
         } catch (e: Exception) {
             json
         }
+    }
+    
+    private fun sendPlaybackStateUpdate(isPlaying: Boolean, positionMs: Long) {
+        // Get stored values for track info from lastStateUpdate or use defaults
+        val lastState = lastStateUpdate.value
+        val stateUpdate = StateUpdate(
+            artist = lastState?.artist,
+            album = lastState?.album,
+            track = lastState?.track,
+            duration_ms = lastState?.duration_ms ?: 300000, // Default 5 min
+            position_ms = positionMs,
+            is_playing = isPlaying,
+            volume_percent = lastState?.volume_percent ?: 50
+        )
+        
+        // Send the state update through broadcast to service
+        val intent = Intent(NocturneService.ACTION_DEBUG_STATE_UPDATE)
+        intent.putExtra(NocturneService.EXTRA_JSON_DATA, gson.toJson(stateUpdate))
+        sendBroadcast(intent)
+        
+        // Update local state
+        lastStateUpdate.value = stateUpdate
+        
+        // Log it
+        val logEntry = DebugLogger.DebugLogEntry(
+            timestamp = System.currentTimeMillis(),
+            level = BleConstants.DebugLevel.INFO,
+            type = "PLAYBACK_UPDATE",
+            message = "Sent playback state update",
+            data = mapOf(
+                "is_playing" to isPlaying.toString(),
+                "position_ms" to positionMs.toString()
+            )
+        )
+        debugLogs.add(logEntry)
+    }
+    
+    private fun sendFullStateUpdate(
+        isPlaying: Boolean,
+        positionMs: Long,
+        durationMs: Long,
+        artist: String,
+        album: String,
+        track: String,
+        volumePercent: Int
+    ) {
+        val stateUpdate = StateUpdate(
+            artist = artist,
+            album = album,
+            track = track,
+            duration_ms = durationMs,
+            position_ms = positionMs,
+            is_playing = isPlaying,
+            volume_percent = volumePercent
+        )
+        
+        // Send the state update through broadcast to service
+        val intent = Intent(NocturneService.ACTION_DEBUG_STATE_UPDATE)
+        intent.putExtra(NocturneService.EXTRA_JSON_DATA, gson.toJson(stateUpdate))
+        sendBroadcast(intent)
+        
+        // Update local state
+        lastStateUpdate.value = stateUpdate
+        
+        // Log it
+        val logEntry = DebugLogger.DebugLogEntry(
+            timestamp = System.currentTimeMillis(),
+            level = BleConstants.DebugLevel.INFO,
+            type = "FULL_STATE_UPDATE",
+            message = "Sent full state update",
+            data = mapOf(
+                "state" to gson.toJson(stateUpdate)
+            )
+        )
+        debugLogs.add(logEntry)
+    }
+    
+    private fun sendTimeSync() {
+        val timeSyncData = mapOf(
+            "type" to "time_sync",
+            "timestamp" to System.currentTimeMillis()
+        )
+        
+        // Send time sync through broadcast to service
+        val intent = Intent(NocturneService.ACTION_DEBUG_TIME_SYNC)
+        intent.putExtra(NocturneService.EXTRA_JSON_DATA, gson.toJson(timeSyncData))
+        sendBroadcast(intent)
+        
+        // Log it
+        val logEntry = DebugLogger.DebugLogEntry(
+            timestamp = System.currentTimeMillis(),
+            level = BleConstants.DebugLevel.INFO,
+            type = "TIME_SYNC",
+            message = "Sent time sync",
+            data = timeSyncData
+        )
+        debugLogs.add(logEntry)
+    }
+    
+    private fun sendActualTrackInfo() {
+        // Get the last known state from the service
+        val currentState = lastStateUpdate.value
+        
+        if (currentState == null || (currentState.artist == null && currentState.track == null)) {
+            // No track info available
+            val noTrackData = mapOf(
+                "type" to "stateUpdate",
+                "error" to "No active media session",
+                "timestamp" to System.currentTimeMillis()
+            )
+            
+            val intent = Intent(NocturneService.ACTION_DEBUG_STATE_UPDATE)
+            intent.putExtra(NocturneService.EXTRA_JSON_DATA, gson.toJson(noTrackData))
+            sendBroadcast(intent)
+            
+            debugLogs.add(DebugLogger.DebugLogEntry(
+                timestamp = System.currentTimeMillis(),
+                level = BleConstants.DebugLevel.WARNING,
+                type = "TRACK_INFO",
+                message = "No track info available",
+                data = noTrackData
+            ))
+            return
+        }
+        
+        // Send the actual current media state
+        val intent = Intent(NocturneService.ACTION_DEBUG_STATE_UPDATE)
+        intent.putExtra(NocturneService.EXTRA_JSON_DATA, gson.toJson(currentState))
+        sendBroadcast(intent)
+        
+        debugLogs.add(DebugLogger.DebugLogEntry(
+            timestamp = System.currentTimeMillis(),
+            level = BleConstants.DebugLevel.INFO,
+            type = "TRACK_INFO",
+            message = "Sent actual track info",
+            data = mapOf(
+                "artist" to (currentState.artist ?: "Unknown"),
+                "track" to (currentState.track ?: "Unknown"),
+                "album" to (currentState.album ?: "Unknown"),
+                "duration_ms" to currentState.duration_ms,
+                "position_ms" to currentState.position_ms,
+                "is_playing" to currentState.is_playing
+            )
+        ))
+    }
+    
+    private fun sendSystemTime() {
+        val systemTimeData = mapOf(
+            "type" to "system_time",
+            "timestamp_ms" to System.currentTimeMillis(),
+            "timezone" to TimeZone.getDefault().id,
+            "timezone_offset" to TimeZone.getDefault().rawOffset,
+            "formatted_time" to SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        )
+        
+        // Send system time through broadcast to service
+        val intent = Intent(NocturneService.ACTION_DEBUG_TIME_SYNC)
+        intent.putExtra(NocturneService.EXTRA_JSON_DATA, gson.toJson(systemTimeData))
+        sendBroadcast(intent)
+        
+        // Log it
+        debugLogs.add(DebugLogger.DebugLogEntry(
+            timestamp = System.currentTimeMillis(),
+            level = BleConstants.DebugLevel.INFO,
+            type = "SYSTEM_TIME",
+            message = "Sent system time",
+            data = systemTimeData
+        ))
     }
     
     private suspend fun updateAlbumArtFromMediaSession() {
