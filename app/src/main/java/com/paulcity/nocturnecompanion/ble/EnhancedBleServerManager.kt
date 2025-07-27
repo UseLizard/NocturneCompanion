@@ -320,7 +320,7 @@ class EnhancedBleServerManager(
                     
                     // Handle special commands
                     when (command.command) {
-                        "album_art_needed" -> {
+                        "album_art_needed", "album_art_query" -> {
                             // Extract track_id and checksum from payload
                             val payload = command.payload
                             val trackId = payload?.get("track_id") as? String ?: ""
@@ -329,10 +329,12 @@ class EnhancedBleServerManager(
                             debugLogger.info(
                                 "ALBUM_ART",
                                 "Album art requested",
-                                mapOf("track_id" to trackId, "checksum" to checksum)
+                                mapOf("track_id" to trackId, "checksum" to checksum, "command" to command.command)
                             )
                             
-                            startAlbumArtTransfer(trackId, checksum)
+                            // For album_art_query, the checksum is the artist/album hash
+                            // We need to check if we have album art for this hash
+                            handleAlbumArtQuery(device, trackId, checksum)
                         }
                         else -> {
                             // Regular command
@@ -936,6 +938,64 @@ class EnhancedBleServerManager(
             )
         }
         _connectedDevicesList.value = devices
+    }
+    
+    private fun handleAlbumArtQuery(device: BluetoothDevice, trackId: String, requestedChecksum: String) {
+        debugLogger.info(
+            "ALBUM_ART_QUERY",
+            "Processing album art query",
+            mapOf("track_id" to trackId, "checksum" to requestedChecksum)
+        )
+        
+        // Get current album art from media session or media store
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                // Get album art based on current media
+                val albumArtResult = mediaStoreAlbumArtManager?.getAlbumArtFromCurrentMedia()
+                
+                if (albumArtResult != null) {
+                    val (artData, checksum) = albumArtResult
+                    
+                    debugLogger.info(
+                        "ALBUM_ART_QUERY",
+                        "Found album art",
+                        mapOf(
+                            "size" to artData.size.toString(),
+                            "checksum" to checksum,
+                            "requested_checksum" to requestedChecksum
+                        )
+                    )
+                    
+                    // Send the album art
+                    sendAlbumArt(artData, checksum, trackId)
+                } else {
+                    // No album art available
+                    debugLogger.info(
+                        "ALBUM_ART_QUERY",
+                        "No album art available",
+                        mapOf("track_id" to trackId)
+                    )
+                    
+                    // Send a response indicating no album art
+                    val noArtMsg = mapOf(
+                        "type" to "album_art_not_available",
+                        "track_id" to trackId,
+                        "checksum" to requestedChecksum
+                    )
+                    val msgData = gson.toJson(noArtMsg).toByteArray()
+                    sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, msgData)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling album art query", e)
+                debugLogger.error(
+                    "ALBUM_ART_QUERY",
+                    "Failed to process query",
+                    mapOf("error" to e.message.orEmpty())
+                )
+            }
+            
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+        }
     }
     
     fun stopServer() {

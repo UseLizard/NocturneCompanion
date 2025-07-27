@@ -98,6 +98,32 @@ class MediaStoreAlbumArtManager(private val context: Context) {
     }
     
     /**
+     * Get album art from the currently playing media
+     * This uses the NocturneNotificationListener to get current metadata
+     */
+    fun getAlbumArtFromCurrentMedia(): Pair<ByteArray, String>? {
+        try {
+            // Get current media controller from the notification listener
+            val mediaController = com.paulcity.nocturnecompanion.services.NocturneNotificationListener.activeMediaController.value
+            if (mediaController == null) {
+                Log.d(TAG, "No active media controller")
+                return null
+            }
+            
+            val metadata = mediaController.metadata
+            if (metadata == null) {
+                Log.d(TAG, "No metadata from current media controller")
+                return null
+            }
+            
+            return getAlbumArt(metadata)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting album art from current media", e)
+            return null
+        }
+    }
+    
+    /**
      * Query MediaStore for album ID
      */
     private fun getAlbumId(artist: String?, album: String?): Long? {

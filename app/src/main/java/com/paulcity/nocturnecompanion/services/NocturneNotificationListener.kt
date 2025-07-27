@@ -57,9 +57,13 @@ class NocturneNotificationListener : NotificationListenerService() {
             // Find the highest-priority controller using multi-tiered prioritization
             val bestController = controllers.sortedWith(
                 // Primary Sort: Actively playing sessions come first
-                compareByDescending<MediaController> { it.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING }
+                compareByDescending<MediaController> { controller -> 
+                    controller.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING 
+                }
                 // Secondary Sort: Tie-break with the most recently updated session
-                .thenByDescending { it.playbackState?.lastPositionUpdateTime ?: 0 }
+                .thenByDescending { controller -> 
+                    controller.playbackState?.lastPositionUpdateTime ?: 0L 
+                }
             ).firstOrNull()
 
             // Update the StateFlow intelligently
