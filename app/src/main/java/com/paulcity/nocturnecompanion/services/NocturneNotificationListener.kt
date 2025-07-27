@@ -42,22 +42,44 @@ class NocturneNotificationListener : NotificationListenerService() {
 
             Log.d("NotificationListener", "Found ${controllers.size} active media sessions")
             
+            // Log all sessions for debugging
             for (i in controllers.indices) {
                 val controller = controllers[i]
-                Log.d("NotificationListener", "Session $i: ${controller.packageName}, playing: ${controller.playbackState?.state}")
+                val state = controller.playbackState
+                Log.d("NotificationListener", 
+                    "Session $i: ${controller.packageName}, " +
+                    "playing: ${state?.state == android.media.session.PlaybackState.STATE_PLAYING}, " +
+                    "state: ${state?.state}, " +
+                    "lastUpdate: ${state?.lastPositionUpdateTime}"
+                )
             }
 
-            if (controllers.isNotEmpty()) {
-                val newController = controllers[0]
-                if (newController.packageName != _activeMediaController.value?.packageName) {
-                    Log.d("NotificationListener", "Active session changed to: ${newController.packageName}")
-                    _activeMediaController.value = newController
-                } else {
-                    Log.d("NotificationListener", "Keeping existing session: ${newController.packageName}")
-                }
-            } else {
-                Log.w("NotificationListener", "No active media sessions found")
+            // Find the highest-priority controller using multi-tiered prioritization
+            val bestController = controllers.sortedWith(
+                // Primary Sort: Actively playing sessions come first
+                compareByDescending<MediaController> { it.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING }
+                // Secondary Sort: Tie-break with the most recently updated session
+                .thenByDescending { it.playbackState?.lastPositionUpdateTime ?: 0 }
+            ).firstOrNull()
+
+            // Update the StateFlow intelligently
+            val currentController = _activeMediaController.value
+            
+            if (bestController?.packageName != currentController?.packageName || 
+                (bestController != null && currentController == null)) {
+                // Session has changed, update the StateFlow
+                Log.d("NotificationListener", 
+                    "Active session changed from ${currentController?.packageName} to ${bestController?.packageName}")
+                _activeMediaController.value = bestController
+            } else if (bestController == null && currentController != null) {
+                // No active sessions anymore
+                Log.w("NotificationListener", "No active media sessions found, clearing current session")
                 _activeMediaController.value = null
+            } else {
+                // The highest-priority session is the one we are already tracking
+                Log.d("NotificationListener", 
+                    "Keeping existing session: ${currentController?.packageName} " +
+                    "(priority unchanged)")
             }
         } catch (e: Exception) {
             Log.e("NotificationListener", "Error updating media session", e)

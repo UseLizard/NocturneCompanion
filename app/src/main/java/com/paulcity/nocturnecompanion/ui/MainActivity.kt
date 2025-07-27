@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -37,6 +38,8 @@ import android.util.Base64
 import com.google.gson.JsonParser
 import com.paulcity.nocturnecompanion.services.NocturneServiceBLE
 import com.paulcity.nocturnecompanion.ui.theme.NocturneCompanionTheme
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 
 sealed class ArtworkResult {
     data class Success(val bitmap: Bitmap, val sizeBytes: Int) : ArtworkResult()
@@ -314,6 +317,7 @@ class MainActivity : ComponentActivity() {
    }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
    devices: List<BluetoothDevice>,
@@ -330,14 +334,26 @@ fun MainScreen(
 ) {
    var selectedTabIndex by remember { mutableStateOf(0) }
    val tabTitles = listOf("Main", "Debug Data", "Devices")
+   val context = LocalContext.current
 
    Column(
        modifier = Modifier.fillMaxSize()
    ) {
-       Text(
-           "Nocturne Companion",
-           style = MaterialTheme.typography.headlineMedium,
-           modifier = Modifier.padding(16.dp)
+       TopAppBar(
+           title = { Text("Nocturne Companion") },
+           actions = {
+               IconButton(onClick = {
+                   // Launch DebugActivity
+                   val intent = Intent(context, DebugActivity::class.java)
+                   context.startActivity(intent)
+               }) {
+                   Icon(
+                       imageVector = Icons.Default.MoreVert,
+                       contentDescription = "Open Debug View",
+                       tint = MaterialTheme.colorScheme.primary
+                   )
+               }
+           }
        )
        
        TabRow(selectedTabIndex = selectedTabIndex) {
