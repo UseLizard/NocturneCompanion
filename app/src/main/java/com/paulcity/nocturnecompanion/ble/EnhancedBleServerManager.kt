@@ -8,6 +8,12 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.Shader
 import android.media.MediaMetadata
 import android.os.Build
 import android.os.ParcelUuid
@@ -17,6 +23,7 @@ import androidx.core.app.ActivityCompat
 import com.google.gson.Gson
 import com.paulcity.nocturnecompanion.data.Command
 import com.paulcity.nocturnecompanion.data.StateUpdate
+import com.paulcity.nocturnecompanion.services.NocturneNotificationListener
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,6 +32,11 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlin.coroutines.coroutineContext
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicInteger
+import java.security.MessageDigest
+import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.channels.Channel
 
 /**
  * Enhanced BLE Server Manager with improved support for:
@@ -63,6 +75,7 @@ class EnhancedBleServerManager(
     private val albumArtManager = AlbumArtManager()
     private val mediaStoreAlbumArtManager = MediaStoreAlbumArtManager(context)
     private val albumArtTransferJobs = ConcurrentHashMap<String, Job>()
+    private val binaryEncoder = BinaryAlbumArtEncoder()
     
     // Debug logging
     private val debugLogger = DebugLogger()
@@ -71,6 +84,10 @@ class EnhancedBleServerManager(
     
     // Track last sent state to avoid duplicates
     private var lastSentStateJson: String = ""
+    
+    // Message queue for congestion control
+    private lateinit var messageQueue: MessageQueue
+    private val messageQueueScope = CoroutineScope(Dispatchers.IO)
     
     // Device tracking for UI
     private val _connectedDevicesList = MutableStateFlow<List<DeviceInfo>>(emptyList())
@@ -81,7 +98,9 @@ class EnhancedBleServerManager(
         val connectionTime: Long = System.currentTimeMillis(),
         var mtu: Int = 23, // Default BLE MTU
         val subscriptions: MutableSet<String> = mutableSetOf(),
-        var lastActivity: Long = System.currentTimeMillis()
+        var lastActivity: Long = System.currentTimeMillis(),
+        var supportsBinaryProtocol: Boolean = false, // Track binary protocol support
+        var requestHighPriority: Boolean = false // Request high priority connection
     )
     
     data class DeviceInfo(
@@ -133,6 +152,25 @@ class EnhancedBleServerManager(
             _connectionStatus.value = "Bluetooth Disabled"
             return
         }
+        
+        // Initialize message queue
+        messageQueue = MessageQueue(messageQueueScope) { device, charUuid, data ->
+            sendNotificationDirectly(device, charUuid, data)
+        }
+        
+        // Load saved album art settings
+        val prefs = context.getSharedPreferences("AlbumArtSettings", Context.MODE_PRIVATE)
+        val savedFormat = prefs.getString("imageFormat", "JPEG") ?: "JPEG"
+        val savedQuality = prefs.getInt("compressionQuality", 85)
+        val savedSize = prefs.getInt("imageSize", 300)
+        val savedChunkDelay = prefs.getInt("chunkDelayMs", 5)
+        val savedUseBinary = prefs.getBoolean("useBinaryProtocol", true)
+        
+        // Apply saved settings
+        albumArtManager.updateSettings(savedFormat, savedQuality, savedSize)
+        messageQueue.updateSettings(512, savedChunkDelay, savedUseBinary)
+        
+        Log.d(TAG, "Loaded saved settings - Format: $savedFormat, Quality: $savedQuality, Size: $savedSize")
         
         // Check permissions
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -250,6 +288,18 @@ class EnhancedBleServerManager(
                         // Try to request higher MTU for better performance
                         gattServer?.connect(device, false)
                         
+                        // Request high connection priority for faster transfers
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                            try {
+                                // We need to use the BluetoothGatt object from the client side
+                                // Since we're the server, we'll track this request for when we get a client connection
+                                deviceContext.requestHighPriority = true
+                                Log.d(TAG, "Marked device ${device.address} for high priority connection")
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to mark for high priority", e)
+                            }
+                        }
+                        
                         debugLogger.info(
                             "CONNECTION",
                             "Device connected",
@@ -276,6 +326,11 @@ class EnhancedBleServerManager(
                     connectedDevices.remove(device.address)
                     updateConnectionStatus()
                     updateConnectedDevicesList()
+                    
+                    // Clear message queue for this device
+                    if (::messageQueue.isInitialized) {
+                        messageQueue.clearDeviceQueue(device.address)
+                    }
                     
                     debugLogger.info(
                         "CONNECTION",
@@ -320,6 +375,65 @@ class EnhancedBleServerManager(
                     
                     // Handle special commands
                     when (command.command) {
+                        "request_high_priority_connection" -> {
+                            // Request high priority connection for fast transfers
+                            val reason = command.payload?.get("reason") as? String ?: "unknown"
+                            debugLogger.info(
+                                "CONNECTION",
+                                "High priority connection requested",
+                                mapOf("device" to device.address, "reason" to reason)
+                            )
+                            
+                            // As a GATT server (peripheral), we can request connection parameter updates
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                try {
+                                    // Request connection parameter update for low latency
+                                    // Note: The central (nocturned) must accept these parameters
+                                    val minInterval = 6    // 7.5ms (6 * 1.25ms)
+                                    val maxInterval = 12   // 15ms (12 * 1.25ms)
+                                    val latency = 0        // No slave latency for fastest response
+                                    val timeout = 500      // 5 second supervision timeout (500 * 10ms)
+                                    
+                                    // BluetoothGattServer doesn't have direct connection parameter update API
+                                    // But we can log what we would request
+                                    Log.d(TAG, "Optimal connection parameters for ${device.address}:")
+                                    Log.d(TAG, "  Min interval: ${minInterval * 1.25}ms")
+                                    Log.d(TAG, "  Max interval: ${maxInterval * 1.25}ms")
+                                    Log.d(TAG, "  Slave latency: $latency")
+                                    Log.d(TAG, "  Supervision timeout: ${timeout * 10}ms")
+                                    
+                                    // Note: On Android 8.0+, connection parameters are largely controlled
+                                    // by the system based on the active connection's requirements
+                                    
+                                    // Send acknowledgment with current connection info
+                                    val ackMsg = mapOf(
+                                        "type" to "connection_priority_response",
+                                        "status" to "acknowledged",
+                                        "mtu" to connectedDevices[device.address]?.mtu,
+                                        "note" to "Connection parameters logged. Android system manages BLE connection intervals."
+                                    )
+                                    val ackData = gson.toJson(ackMsg).toByteArray()
+                                    sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, ackData)
+                                    
+                                    // Log connection quality
+                                    val quality = getConnectionQuality(device.address)
+                                    Log.d(TAG, "Current connection quality: $quality")
+                                    
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Failed to process high priority request", e)
+                                }
+                            } else {
+                                // Pre-Android O
+                                Log.d(TAG, "Connection parameter updates not available on API ${Build.VERSION.SDK_INT}")
+                                val ackMsg = mapOf(
+                                    "type" to "connection_priority_response",
+                                    "status" to "unsupported",
+                                    "api_level" to Build.VERSION.SDK_INT
+                                )
+                                val ackData = gson.toJson(ackMsg).toByteArray()
+                                sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, ackData)
+                            }
+                        }
                         "album_art_needed", "album_art_query" -> {
                             // Extract track_id and checksum from payload
                             val payload = command.payload
@@ -335,6 +449,65 @@ class EnhancedBleServerManager(
                             // For album_art_query, the checksum is the artist/album hash
                             // We need to check if we have album art for this hash
                             handleAlbumArtQuery(device, trackId, checksum)
+                        }
+                        "test_album_art_request" -> {
+                            // Test command that requests current track's album art
+                            debugLogger.info(
+                                "TEST_ALBUM_ART",
+                                "Test album art request received",
+                                mapOf("device" to device.address)
+                            )
+                            
+                            // Handle test album art request for current track
+                            handleTestAlbumArtRequest(device)
+                        }
+                        "test_album_art" -> {
+                            // Test command for album art transfer with custom settings
+                            debugLogger.info(
+                                "ALBUM_ART_TEST",
+                                "Test album art transfer requested",
+                                mapOf("device" to device.address)
+                            )
+                            
+                            // Send a test album art image
+                            handleTestAlbumArt(device)
+                        }
+                        "get_capabilities" -> {
+                            // Send capabilities including binary protocol support
+                            val capabilities = mapOf(
+                                "type" to "capabilities",
+                                "binary_protocol" to true,
+                                "binary_protocol_version" to BinaryProtocol.PROTOCOL_VERSION.toInt(),
+                                "max_mtu" to BleConstants.TARGET_MTU,
+                                "album_art_formats" to listOf("webp", "binary"),
+                                "features" to listOf("album_art", "time_sync", "media_control", "binary_transfer")
+                            )
+                            val capabilitiesData = gson.toJson(capabilities).toByteArray()
+                            sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, capabilitiesData)
+                            
+                            debugLogger.info(
+                                "CAPABILITIES",
+                                "Sent capabilities with binary protocol support",
+                                mapOf("device" to device.address)
+                            )
+                        }
+                        "enable_binary_protocol" -> {
+                            // Enable binary protocol for this device
+                            connectedDevices[device.address]?.supportsBinaryProtocol = true
+                            
+                            debugLogger.info(
+                                "BINARY_PROTOCOL",
+                                "Binary protocol enabled",
+                                mapOf("device" to device.address)
+                            )
+                            
+                            // Send acknowledgment
+                            val ack = mapOf(
+                                "type" to "binary_protocol_enabled",
+                                "version" to BinaryProtocol.PROTOCOL_VERSION.toInt()
+                            )
+                            val ackData = gson.toJson(ack).toByteArray()
+                            sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, ackData)
                         }
                         else -> {
                             // Regular command
@@ -431,10 +604,21 @@ class EnhancedBleServerManager(
             connectedDevices[device.address]?.mtu = mtu
             updateConnectedDevicesList()
             
+            // Calculate optimal chunk size for album art based on new MTU
+            val effectiveMtu = mtu - 3
+            val jsonOverhead = 174 // Typical JSON overhead for album art chunks
+            val optimalChunkSize = maxOf(50, effectiveMtu - jsonOverhead)
+            
             debugLogger.info(
                 "MTU_CHANGED",
-                "MTU changed",
-                mapOf("device" to device.address, "mtu" to mtu)
+                "MTU negotiated - Album art optimization ready",
+                mapOf(
+                    "device" to device.address, 
+                    "mtu" to mtu.toString(),
+                    "effective_mtu" to effectiveMtu.toString(),
+                    "optimal_chunk_size" to optimalChunkSize.toString(),
+                    "improvement" to String.format("%.1fx vs 400-byte chunks", optimalChunkSize / 400.0)
+                )
             )
             
             CoroutineScope(Dispatchers.IO).launch {
@@ -514,7 +698,8 @@ class EnhancedBleServerManager(
                 mapOf("state" to stateJson)
             )
             
-            sendNotificationToAll(BleConstants.STATE_TX_CHAR_UUID, stateJson)
+            // Use HIGH priority for state updates
+            sendNotificationToAll(BleConstants.STATE_TX_CHAR_UUID, stateJson, MessageQueue.Priority.NORMAL)
             
             CoroutineScope(Dispatchers.IO).launch {
                 _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
@@ -531,24 +716,66 @@ class EnhancedBleServerManager(
             mapOf("data" to json)
         )
         
-        sendNotificationToAll(BleConstants.STATE_TX_CHAR_UUID, json)
+        // Determine priority based on data type
+        val priority = when {
+            json.contains("\"type\":\"timeSync\"") -> MessageQueue.Priority.HIGH
+            json.contains("\"type\":\"album_art_start\"") -> MessageQueue.Priority.NORMAL
+            json.contains("\"type\":\"album_art_end\"") -> MessageQueue.Priority.NORMAL
+            else -> MessageQueue.Priority.NORMAL
+        }
+        
+        sendNotificationToAll(BleConstants.STATE_TX_CHAR_UUID, json, priority)
         
         CoroutineScope(Dispatchers.IO).launch {
             _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
         }
     }
     
-    private fun sendNotificationToAll(characteristicUuid: UUID, data: String) {
+    private fun sendNotificationToAll(characteristicUuid: UUID, data: String, priority: MessageQueue.Priority = MessageQueue.Priority.NORMAL) {
         val dataBytes = data.toByteArray(Charsets.UTF_8)
         
         connectedDevices.values.forEach { context ->
             if (context.subscriptions.contains(characteristicUuid.toString())) {
-                sendNotificationToDevice(context.device, characteristicUuid, dataBytes)
+                // Queue the message instead of sending directly
+                val message = MessageQueue.Message(
+                    device = context.device,
+                    characteristicUuid = characteristicUuid,
+                    data = dataBytes,
+                    priority = priority
+                )
+                
+                if (!messageQueue.enqueue(message)) {
+                    Log.w(TAG, "Failed to enqueue message for ${context.device.address} - queue full")
+                }
             }
         }
     }
     
+    // Renamed to indicate this is now the direct send function
+    private suspend fun sendNotificationDirectly(device: BluetoothDevice, characteristicUuid: UUID, data: ByteArray): Boolean {
+        return sendNotificationToDeviceInternal(device, characteristicUuid, data)
+    }
+    
     private fun sendNotificationToDevice(device: BluetoothDevice, characteristicUuid: UUID, data: ByteArray) {
+        // Queue the message instead of sending directly
+        val priority = when (characteristicUuid) {
+            BleConstants.ALBUM_ART_TX_CHAR_UUID -> MessageQueue.Priority.BULK
+            else -> MessageQueue.Priority.NORMAL
+        }
+        
+        val message = MessageQueue.Message(
+            device = device,
+            characteristicUuid = characteristicUuid,
+            data = data,
+            priority = priority
+        )
+        
+        if (!messageQueue.enqueue(message)) {
+            Log.w(TAG, "Failed to enqueue direct message for ${device.address}")
+        }
+    }
+    
+    private fun sendNotificationToDeviceInternal(device: BluetoothDevice, characteristicUuid: UUID, data: ByteArray): Boolean {
         val service = gattServer?.getService(BleConstants.NOCTURNE_SERVICE_UUID)
         val characteristic = service?.getCharacteristic(characteristicUuid)
         
@@ -585,6 +812,7 @@ class EnhancedBleServerManager(
                         )
                     )
                 }
+                return true
             } else {
                 // Data exceeds MTU - implement chunking for large messages
                 Log.w(TAG, "Data size ${data.size} exceeds MTU-3 ($effectiveMtu) for device ${device.address}")
@@ -613,7 +841,7 @@ class EnhancedBleServerManager(
                             characteristic.value = compactData
                             gattServer?.notifyCharacteristicChanged(device, characteristic, false)
                             Log.i(TAG, "Sent compacted notification (${compactData.size} bytes, original ${data.size} bytes)")
-                            return
+                            return true
                         }
                         
                         // Still too large, truncate metadata fields
@@ -632,7 +860,7 @@ class EnhancedBleServerManager(
                             characteristic.value = truncatedJsonData
                             gattServer?.notifyCharacteristicChanged(device, characteristic, false)
                             Log.w(TAG, "Sent truncated metadata notification (${truncatedJsonData.size} bytes)")
-                            return
+                            return true
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Error compacting JSON", e)
@@ -650,7 +878,11 @@ class EnhancedBleServerManager(
                         "char_uuid" to characteristicUuid.toString()
                     )
                 )
+                return false
             }
+        } else {
+            Log.e(TAG, "Characteristic not found: $characteristicUuid")
+            return false
         }
         
         // Emit debug log asynchronously
@@ -659,6 +891,9 @@ class EnhancedBleServerManager(
         }
     }
     
+    // DEPRECATED: Album art is now only sent when requested via album_art_query
+    // This follows the nocturned protocol where it checks its cache first
+    /*
     fun sendAlbumArtFromMetadata(metadata: android.media.MediaMetadata?, trackId: String) {
         CoroutineScope(Dispatchers.IO).launch {
             val artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
@@ -716,20 +951,19 @@ class EnhancedBleServerManager(
             _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
         }
     }
+    */
     
     fun sendAlbumArt(albumArtData: ByteArray, checksum: String, trackId: String) {
-        // For now, immediately start the transfer without waiting for a query
-        // This simplifies the implementation until nocturned supports the query/response pattern
+        // Called when nocturned has requested album art via album_art_query
+        // and we've validated that the MD5 hash matches
         
         debugLogger.info(
             "ALBUM_ART",
-            "Starting album art transfer immediately",
+            "Sending requested album art",
             mapOf("track_id" to trackId, "checksum" to checksum, "size" to albumArtData.size.toString())
         )
         
-        CoroutineScope(Dispatchers.IO).launch {
-            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
-        }
+        // Debug log emission is handled by the calling function (handleAlbumArtQuery)
         
         // Cache the album art data
         albumArtManager.getArtFromCache(trackId) ?: run {
@@ -789,12 +1023,55 @@ class EnhancedBleServerManager(
             val deviceContext = connectedDevices[device.address] ?: return
             val effectiveMtu = deviceContext.mtu - 3 // Account for BLE overhead
             
+            // Use binary protocol if supported
+            if (deviceContext.supportsBinaryProtocol) {
+                sendAlbumArtBinary(device, albumArtData, checksum, trackId, deviceContext)
+            } else {
+                sendAlbumArtJson(device, albumArtData, checksum, trackId, deviceContext)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during album art transfer", e)
+            
+            debugLogger.error(
+                "ERROR",
+                "Album art transfer failed: ${e.message}",
+                mapOf("device" to device.address)
+            )
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
+            
+            // Send failure notification
+            try {
+                if (connectedDevices[device.address]?.supportsBinaryProtocol == true) {
+                    val endData = binaryEncoder.encodeAlbumArtEnd(checksum, false)
+                    sendNotificationToDevice(device, BleConstants.ALBUM_ART_TX_CHAR_UUID, endData)
+                } else {
+                    val endMsg = AlbumArtEnd(checksum = checksum, success = false)
+                    val endData = gson.toJson(endMsg).toByteArray()
+                    sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, endData)
+                }
+            } catch (e2: Exception) {
+                Log.e(TAG, "Failed to send error notification", e2)
+            }
+        }
+    }
+    
+    private suspend fun sendAlbumArtJson(
+        device: BluetoothDevice,
+        albumArtData: ByteArray,
+        checksum: String,
+        trackId: String,
+        deviceContext: DeviceContext
+    ) {
+        val effectiveMtu = deviceContext.mtu - 3
+            
             // Account for JSON overhead when calculating chunk size
             // JSON structure: {"type":"album_art_chunk","checksum":"...","chunk_index":0,"data":"..."}
-            // Estimated overhead: ~100 bytes for JSON structure + checksum
-            val jsonOverhead = 150 // Conservative estimate for JSON wrapper
+            // Base JSON overhead (without data): ~90 bytes + checksum length (64)
+            val jsonOverhead = 90 + checksum.length + 20 // ~174 bytes for JSON wrapper
             val maxDataSize = effectiveMtu - jsonOverhead
-            val chunkSize = minOf(maxDataSize, 400) // Conservative chunk size
+            val chunkSize = maxOf(50, maxDataSize) // Use full available MTU, minimum 50 bytes
+            
+            Log.d(TAG, "Album art chunk sizing - MTU: ${deviceContext.mtu}, Effective: $effectiveMtu, JSON overhead: $jsonOverhead, Chunk size: $chunkSize")
             
             // Convert to base64 for transmission
             val base64Data = android.util.Base64.encodeToString(albumArtData, android.util.Base64.NO_WRAP)
@@ -811,7 +1088,14 @@ class EnhancedBleServerManager(
             )
             
             val startData = gson.toJson(startMsg).toByteArray()
-            sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, startData)
+            // Use message queue with NORMAL priority for album art start
+            val startMessage = MessageQueue.Message(
+                device = device,
+                characteristicUuid = BleConstants.STATE_TX_CHAR_UUID,
+                data = startData,
+                priority = MessageQueue.Priority.NORMAL
+            )
+            messageQueue.enqueue(startMessage)
             
             debugLogger.info(
                 "ALBUM_ART",
@@ -824,7 +1108,12 @@ class EnhancedBleServerManager(
             )
             _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
             
-            delay(50) // Small delay between start and chunks
+            // Removed delay - message queue handles pacing
+            
+            // Track chunk transmission completion
+            val chunksToSend = totalChunks
+            val chunksSent = java.util.concurrent.atomic.AtomicInteger(0)
+            val sendCompleteLatch = java.util.concurrent.CountDownLatch(totalChunks)
             
             // Send chunks
             for (i in 0 until totalChunks) {
@@ -857,7 +1146,28 @@ class EnhancedBleServerManager(
                     )
                 }
                 
-                sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, chunkJson)
+                // Use BULK priority for album art chunks with callback
+                val chunkMessage = MessageQueue.Message(
+                    device = device,
+                    characteristicUuid = BleConstants.ALBUM_ART_TX_CHAR_UUID,
+                    data = chunkJson,
+                    priority = MessageQueue.Priority.BULK,
+                    callback = { success ->
+                        if (success) {
+                            val sent = chunksSent.incrementAndGet()
+                            if (sent % 10 == 0 || sent == chunksToSend) {
+                                Log.d(TAG, "Album art chunk sent: $sent/$chunksToSend")
+                            }
+                        }
+                        sendCompleteLatch.countDown()
+                    }
+                )
+                
+                if (!messageQueue.enqueue(chunkMessage)) {
+                    Log.w(TAG, "Album art chunk queue full, pausing transfer")
+                    sendCompleteLatch.countDown() // Count failed enqueues too
+                    delay(100) // Back off if queue is full
+                }
                 
                 if (i % 10 == 0) {
                     debugLogger.debug(
@@ -871,13 +1181,26 @@ class EnhancedBleServerManager(
                     _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
                 }
                 
-                delay(20) // Small delay between chunks to avoid overwhelming the connection
+                // Message queue handles pacing - no manual delay needed
             }
             
-            // Send end notification
+            // Wait for all chunks to be sent (with timeout)
+            withTimeoutOrNull(30000) { // 30 second timeout
+                withContext(Dispatchers.IO) {
+                    sendCompleteLatch.await()
+                }
+            } ?: Log.w(TAG, "Timeout waiting for all chunks to send")
+            
+            // Send end notification with BULK priority to maintain order
             val endMsg = AlbumArtEnd(checksum = checksum, success = true)
             val endData = gson.toJson(endMsg).toByteArray()
-            sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, endData)
+            val endMessage = MessageQueue.Message(
+                device = device,
+                characteristicUuid = BleConstants.STATE_TX_CHAR_UUID,
+                data = endData,
+                priority = MessageQueue.Priority.BULK
+            )
+            messageQueue.enqueue(endMessage)
             
             Log.d(TAG, "Album art transfer completed to ${device.address}")
             
@@ -887,26 +1210,125 @@ class EnhancedBleServerManager(
                 mapOf("device" to device.address, "checksum" to checksum)
             )
             _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Error during album art transfer", e)
-            
-            debugLogger.error(
-                "ERROR",
-                "Album art transfer failed: ${e.message}",
-                mapOf("device" to device.address)
+    }
+    
+    private suspend fun sendAlbumArtBinary(
+        device: BluetoothDevice,
+        albumArtData: ByteArray,
+        checksum: String,
+        trackId: String,
+        deviceContext: DeviceContext
+    ) {
+        val binaryTransfer = binaryEncoder.encodeAlbumArtTransfer(
+            imageData = albumArtData,
+            checksum = checksum,
+            trackId = trackId,
+            mtu = deviceContext.mtu
+        )
+        
+        Log.d(TAG, "Starting binary album art transfer to ${device.address}: " +
+            "${albumArtData.size} bytes -> ${binaryTransfer.binarySize} bytes, " +
+            "${binaryTransfer.totalChunks} chunks, compression: ${String.format("%.2f", binaryTransfer.compressionRatio)}x")
+        
+        // Send start message
+        val startMessage = MessageQueue.Message(
+            device = device,
+            characteristicUuid = BleConstants.ALBUM_ART_TX_CHAR_UUID,
+            data = binaryTransfer.startMessage,
+            priority = MessageQueue.Priority.NORMAL,
+            isBinary = true
+        )
+        messageQueue.enqueue(startMessage)
+        
+        debugLogger.info(
+            "ALBUM_ART_BINARY",
+            "Binary album art transfer started",
+            mapOf(
+                "device" to device.address,
+                "original_size" to albumArtData.size.toString(),
+                "binary_size" to binaryTransfer.binarySize.toString(),
+                "chunks" to binaryTransfer.totalChunks.toString(),
+                "chunk_size" to binaryTransfer.chunkSize.toString()
             )
-            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
+        )
+        _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
+        
+        // Track chunk transmission completion
+        val chunksToSend = binaryTransfer.totalChunks
+        val chunksSent = java.util.concurrent.atomic.AtomicInteger(0)
+        val sendCompleteLatch = java.util.concurrent.CountDownLatch(chunksToSend)
+        
+        // Send chunks
+        binaryTransfer.chunkMessages.forEachIndexed { index, chunkData ->
+            val currentJob = albumArtTransferJobs[device.address]
+            if (currentJob == null || !currentJob.isActive) return@forEachIndexed
             
-            // Send failure notification
-            try {
-                val endMsg = AlbumArtEnd(checksum = checksum, success = false)
-                val endData = gson.toJson(endMsg).toByteArray()
-                sendNotificationToDevice(device, BleConstants.ALBUM_ART_TX_CHAR_UUID, endData)
-            } catch (e2: Exception) {
-                Log.e(TAG, "Failed to send error notification", e2)
+            val chunkMessage = MessageQueue.Message(
+                device = device,
+                characteristicUuid = BleConstants.ALBUM_ART_TX_CHAR_UUID,
+                data = chunkData,
+                priority = MessageQueue.Priority.BULK,
+                callback = { success ->
+                    if (success) {
+                        val sent = chunksSent.incrementAndGet()
+                        if (sent % 10 == 0 || sent == chunksToSend) {
+                            Log.d(TAG, "Binary album art chunk sent: $sent/$chunksToSend")
+                        }
+                    }
+                    sendCompleteLatch.countDown()
+                },
+                isBinary = true
+            )
+            
+            if (!messageQueue.enqueue(chunkMessage)) {
+                Log.w(TAG, "Binary album art chunk queue full")
+                sendCompleteLatch.countDown()
+                delay(50)
+            }
+            
+            if (index % 20 == 0) {
+                debugLogger.debug(
+                    "ALBUM_ART_BINARY",
+                    "Binary chunk progress",
+                    mapOf(
+                        "device" to device.address,
+                        "progress" to "${index + 1}/$chunksToSend"
+                    )
+                )
+                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
             }
         }
+        
+        // Wait for all chunks to be sent (with timeout)
+        withTimeoutOrNull(30000) { // 30 second timeout
+            withContext(Dispatchers.IO) {
+                sendCompleteLatch.await()
+            }
+        } ?: Log.w(TAG, "Timeout waiting for all binary chunks to send")
+        
+        // Send end message
+        val endMessage = MessageQueue.Message(
+            device = device,
+            characteristicUuid = BleConstants.ALBUM_ART_TX_CHAR_UUID,
+            data = binaryTransfer.endMessage,
+            priority = MessageQueue.Priority.BULK,
+            isBinary = true
+        )
+        messageQueue.enqueue(endMessage)
+        
+        Log.d(TAG, "Binary album art transfer completed to ${device.address}")
+        
+        debugLogger.info(
+            "ALBUM_ART_BINARY",
+            "Binary transfer completed",
+            mapOf(
+                "device" to device.address,
+                "time_ms" to (System.currentTimeMillis() - deviceContext.lastActivity).toString(),
+                "throughput_kb_s" to String.format("%.1f", 
+                    albumArtData.size / 1024.0 / ((System.currentTimeMillis() - deviceContext.lastActivity) / 1000.0))
+            )
+        )
+        _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
     }
     
     private fun updateConnectionStatus() {
@@ -919,6 +1341,21 @@ class EnhancedBleServerManager(
     
     fun hasConnectedDevices(): Boolean {
         return connectedDevices.isNotEmpty()
+    }
+    
+    fun getConnectionQuality(deviceAddress: String): String {
+        if (!::messageQueue.isInitialized) return "Unknown"
+        
+        val congestionStates = messageQueue.congestionState.value
+        val isCongested = congestionStates[deviceAddress] ?: false
+        val queueDepths = messageQueue.getQueueDepths()
+        
+        return when {
+            isCongested -> "Poor - High congestion"
+            queueDepths.third > 100 -> "Fair - Bulk transfer active"
+            queueDepths.second > 20 -> "Good - Moderate load"
+            else -> "Excellent"
+        }
     }
     
     private fun updateConnectedDevicesList() {
@@ -947,43 +1384,77 @@ class EnhancedBleServerManager(
             mapOf("track_id" to trackId, "checksum" to requestedChecksum)
         )
         
+        // Parse track_id to extract artist and album (format: "artist - album")
+        // Note: Currently not used as we validate by comparing MD5 hashes instead
+        
         // Get current album art from media session or media store
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                // Get album art based on current media
-                val albumArtResult = mediaStoreAlbumArtManager?.getAlbumArtFromCurrentMedia()
+                // First check if we have the exact album art in cache by MD5 hash
+                val cachedArt = albumArtManager.getArtFromCache(requestedChecksum)
+                if (cachedArt != null) {
+                    debugLogger.info(
+                        "ALBUM_ART_QUERY",
+                        "Found exact match in cache",
+                        mapOf(
+                            "size" to cachedArt.data.size.toString(),
+                            "checksum" to cachedArt.checksum
+                        )
+                    )
+                    sendAlbumArt(cachedArt.data, cachedArt.checksum, trackId)
+                    _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+                    return@launch
+                }
                 
-                if (albumArtResult != null) {
-                    val (artData, checksum) = albumArtResult
+                // Get current media metadata
+                val currentMetadata = NocturneNotificationListener.activeMediaController.value?.metadata
+                if (currentMetadata != null) {
+                    val currentArtist = currentMetadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
+                    val currentAlbum = currentMetadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+                    
+                    // Generate MD5 hash for current media
+                    val currentHash = albumArtManager.generateMetadataHash(currentArtist, currentAlbum)
                     
                     debugLogger.info(
                         "ALBUM_ART_QUERY",
-                        "Found album art",
+                        "Comparing metadata hashes",
                         mapOf(
-                            "size" to artData.size.toString(),
-                            "checksum" to checksum,
-                            "requested_checksum" to requestedChecksum
+                            "requested" to requestedChecksum,
+                            "current" to currentHash,
+                            "current_artist" to currentArtist,
+                            "current_album" to currentAlbum
                         )
                     )
                     
-                    // Send the album art
-                    sendAlbumArt(artData, checksum, trackId)
+                    // Only send album art if the MD5 hashes match OR if requesting current track (empty checksum)
+                    if (currentHash == requestedChecksum || requestedChecksum.isEmpty() || requestedChecksum == "current") {
+                        // Extract and send the album art
+                        val albumArtResult = albumArtManager.extractAlbumArt(currentMetadata)
+                        if (albumArtResult != null) {
+                            val (artData, sha256Checksum) = albumArtResult
+                            
+                            debugLogger.info(
+                                "ALBUM_ART_QUERY",
+                                "Hash match - sending album art",
+                                mapOf(
+                                    "size" to artData.size.toString(),
+                                    "sha256" to sha256Checksum,
+                                    "md5" to currentHash
+                                )
+                            )
+                            
+                            sendAlbumArt(artData, sha256Checksum, trackId)
+                        } else {
+                            // Hash matches but no art available
+                            sendNoArtAvailable(device, trackId, requestedChecksum, "No artwork in metadata")
+                        }
+                    } else {
+                        // Hash mismatch - different track
+                        sendNoArtAvailable(device, trackId, requestedChecksum, "Track mismatch")
+                    }
                 } else {
-                    // No album art available
-                    debugLogger.info(
-                        "ALBUM_ART_QUERY",
-                        "No album art available",
-                        mapOf("track_id" to trackId)
-                    )
-                    
-                    // Send a response indicating no album art
-                    val noArtMsg = mapOf(
-                        "type" to "album_art_not_available",
-                        "track_id" to trackId,
-                        "checksum" to requestedChecksum
-                    )
-                    val msgData = gson.toJson(noArtMsg).toByteArray()
-                    sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, msgData)
+                    // No current media playing
+                    sendNoArtAvailable(device, trackId, requestedChecksum, "No media playing")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error handling album art query", e)
@@ -992,10 +1463,450 @@ class EnhancedBleServerManager(
                     "Failed to process query",
                     mapOf("error" to e.message.orEmpty())
                 )
+                sendNoArtAvailable(device, trackId, requestedChecksum, "Error: ${e.message}")
             }
             
             _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
         }
+    }
+    
+    private fun sendNoArtAvailable(device: BluetoothDevice, trackId: String, checksum: String, reason: String) {
+        debugLogger.info(
+            "ALBUM_ART_QUERY",
+            "No album art available",
+            mapOf("track_id" to trackId, "reason" to reason)
+        )
+        
+        val noArtMsg = mapOf(
+            "type" to "album_art_not_available",
+            "track_id" to trackId,
+            "checksum" to checksum,
+            "reason" to reason
+        )
+        val msgData = gson.toJson(noArtMsg).toByteArray()
+        sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, msgData)
+    }
+    
+    private fun handleTestAlbumArt(device: BluetoothDevice) {
+        messageQueueScope.launch {
+            try {
+                debugLogger.info(
+                    "ALBUM_ART_TEST", 
+                    "Creating test album art image",
+                    mapOf("device" to device.address)
+                )
+                
+                // Create a test bitmap with gradient and text
+                val size = 300 // Default size, will be updated with actual settings
+                val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bitmap)
+                
+                // Create gradient background
+                val gradient = LinearGradient(
+                    0f, 0f, size.toFloat(), size.toFloat(),
+                    intArrayOf(0xFF6200EA.toInt(), 0xFF03DAC5.toInt()),
+                    null,
+                    Shader.TileMode.CLAMP
+                )
+                val paint = Paint().apply {
+                    shader = gradient
+                }
+                canvas.drawRect(0f, 0f, size.toFloat(), size.toFloat(), paint)
+                
+                // Add text
+                val textPaint = Paint().apply {
+                    color = Color.WHITE
+                    textSize = size / 8f
+                    textAlign = Paint.Align.CENTER
+                    isFakeBoldText = true
+                    isAntiAlias = true
+                }
+                
+                // Draw test info
+                canvas.drawText("Album Art Test", size / 2f, size / 3f, textPaint)
+                canvas.drawText("Size: ${size}x${size}", size / 2f, size / 2f, textPaint)
+                
+                // Get current settings from SharedPreferences
+                val prefs = context.getSharedPreferences("album_art_settings", Context.MODE_PRIVATE)
+                val format = prefs.getString("format", "JPEG") ?: "JPEG"
+                val quality = prefs.getInt("quality", 80)
+                canvas.drawText("Format: $format", size / 2f, size * 2f / 3f, textPaint)
+                canvas.drawText("Quality: $quality", size / 2f, size * 5f / 6f, textPaint)
+                
+                // Compress the bitmap using ByteArrayOutputStream
+                val outputStream = ByteArrayOutputStream()
+                val compressFormat = when (format.uppercase()) {
+                    "WEBP" -> Bitmap.CompressFormat.WEBP
+                    "PNG" -> Bitmap.CompressFormat.PNG
+                    else -> Bitmap.CompressFormat.JPEG
+                }
+                bitmap.compress(compressFormat, quality, outputStream)
+                val artData = outputStream.toByteArray()
+                bitmap.recycle()
+                
+                if (artData != null) {
+                    // Calculate checksum
+                    val sha256Checksum = calculateSha256(artData)
+                    val testTrackId = "test|album|art"
+                    
+                    debugLogger.info(
+                        "ALBUM_ART_TEST",
+                        "Sending test album art",
+                        mapOf(
+                            "size_bytes" to artData.size.toString(),
+                            "sha256" to sha256Checksum,
+                            "format" to format,
+                            "quality" to quality.toString()
+                        )
+                    )
+                    
+                    // Send the test album art
+                    sendAlbumArt(artData, sha256Checksum, testTrackId)
+                } else {
+                    debugLogger.error(
+                        "ALBUM_ART_TEST",
+                        "Failed to compress test image",
+                        mapOf("device" to device.address)
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error creating test album art", e)
+                debugLogger.error(
+                    "ALBUM_ART_TEST",
+                    "Test failed",
+                    mapOf("error" to e.message.orEmpty())
+                )
+            }
+            
+            messageQueueScope.launch {
+                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+            }
+        }
+    }
+    
+    private fun handleTestAlbumArtRequest(device: BluetoothDevice) {
+        messageQueueScope.launch {
+            try {
+                debugLogger.info(
+                    "TEST_ALBUM_ART_REQUEST", 
+                    "Processing test album art request",
+                    mapOf("device" to device.address)
+                )
+                
+                // Try to get album art from cache - check all cached entries
+                val cacheField = AlbumArtManager::class.java.getDeclaredField("albumArtCache")
+                cacheField.isAccessible = true
+                val cache = cacheField.get(albumArtManager) as android.util.LruCache<String, AlbumArtManager.CachedAlbumArt>
+                
+                // Get the most recent album art from cache
+                var albumArtData: ByteArray? = null
+                var trackId: String? = null
+                var checksum: String? = null
+                
+                // Get a snapshot of the cache
+                val snapshot = cache.snapshot()
+                if (snapshot.isNotEmpty()) {
+                    // Get the first (most recent) entry
+                    val entry = snapshot.entries.first()
+                    trackId = entry.key
+                    val cachedArt = entry.value
+                    albumArtData = cachedArt.data
+                    checksum = cachedArt.checksum
+                    
+                    debugLogger.info(
+                        "TEST_ALBUM_ART_REQUEST",
+                        "Found cached album art",
+                        mapOf(
+                            "track_id" to trackId,
+                            "size" to albumArtData.size.toString(),
+                            "checksum" to checksum
+                        )
+                    )
+                } else {
+                    debugLogger.info(
+                        "TEST_ALBUM_ART_REQUEST",
+                        "No album art in cache",
+                        mapOf("device" to device.address)
+                    )
+                    
+                    // Send failure message so UI doesn't get stuck
+                    val failMsg = mapOf(
+                        "type" to "test_album_art_end",
+                        "checksum" to "",
+                        "success" to false
+                    )
+                    val failData = gson.toJson(failMsg).toByteArray()
+                    sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, failData)
+                    
+                    return@launch
+                }
+                
+                if (albumArtData == null || albumArtData.isEmpty()) {
+                    debugLogger.info(
+                        "TEST_ALBUM_ART_REQUEST",
+                        "Album art data is empty",
+                        mapOf("device" to device.address)
+                    )
+                    
+                    // Send failure message so UI doesn't get stuck
+                    val failMsg = mapOf(
+                        "type" to "test_album_art_end",
+                        "checksum" to "",
+                        "success" to false
+                    )
+                    val failData = gson.toJson(failMsg).toByteArray()
+                    sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, failData)
+                    
+                    return@launch
+                }
+                
+                // If no checksum, calculate it
+                if (checksum == null) {
+                    checksum = calculateSha256(albumArtData)
+                }
+                
+                debugLogger.info(
+                    "TEST_ALBUM_ART_REQUEST",
+                    "Sending album art via test flow",
+                    mapOf(
+                        "track_id" to (trackId ?: "unknown"),
+                        "size_bytes" to albumArtData.size.toString(),
+                        "sha256" to checksum
+                    )
+                )
+                
+                // Send album art using test message flow
+                sendTestAlbumArt(device, albumArtData, checksum, trackId ?: "test")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling test album art request", e)
+                debugLogger.error(
+                    "TEST_ALBUM_ART_REQUEST",
+                    "Request failed",
+                    mapOf("error" to e.message.orEmpty())
+                )
+            }
+            
+            messageQueueScope.launch {
+                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+            }
+        }
+    }
+    
+    private suspend fun sendTestAlbumArt(device: BluetoothDevice, artData: ByteArray, checksum: String, trackId: String) {
+        try {
+            val deviceContext = connectedDevices[device.address]
+            if (deviceContext == null) {
+                debugLogger.error(
+                    "TEST_ALBUM_ART_SEND",
+                    "Device context not found",
+                    mapOf("device" to device.address)
+                )
+                return
+            }
+            
+            // Get chunk settings from SharedPreferences
+            val prefs = context.getSharedPreferences("album_art_settings", Context.MODE_PRIVATE)
+            val chunkSize = prefs.getInt("chunk_size", 512)
+            val chunkDelayMs = prefs.getInt("chunk_delay_ms", 20)
+            
+            // Check if we should use binary protocol (same as normal album art)
+            val useBinary = deviceContext.supportsBinaryProtocol
+            
+            debugLogger.info(
+                "TEST_ALBUM_ART_SEND",
+                "Starting test album art transfer",
+                mapOf(
+                    "size" to artData.size.toString(),
+                    "chunk_size" to chunkSize.toString(),
+                    "chunk_delay_ms" to chunkDelayMs.toString(),
+                    "use_binary" to useBinary.toString(),
+                    "device" to device.address
+                )
+            )
+            
+            if (useBinary) {
+                // Use binary protocol for test transfer
+                sendTestAlbumArtBinary(device, artData, checksum, trackId, deviceContext)
+            } else {
+                // Use JSON protocol for test transfer
+                sendTestAlbumArtJson(device, artData, checksum, trackId, chunkSize, chunkDelayMs)
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending test album art", e)
+            
+            // Send failure message
+            val failMsg = mapOf(
+                "type" to "test_album_art_end",
+                "checksum" to checksum,
+                "success" to false
+            )
+            val failData = gson.toJson(failMsg).toByteArray()
+            sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, failData)
+            
+            debugLogger.error(
+                "TEST_ALBUM_ART_SEND",
+                "Test transfer failed",
+                mapOf("error" to e.message.orEmpty())
+            )
+        }
+    }
+    
+    private suspend fun sendTestAlbumArtJson(device: BluetoothDevice, artData: ByteArray, checksum: String, trackId: String, chunkSize: Int, chunkDelayMs: Int) {
+        // Calculate chunks
+        val totalChunks = (artData.size + chunkSize - 1) / chunkSize
+        
+        Log.d(TAG, "TEST: Sending $totalChunks chunks with NO DELAY (was $chunkDelayMs ms)")
+        
+        // Send test start message
+        val startMsg = mapOf(
+            "type" to "test_album_art_start",
+            "size" to artData.size,
+            "checksum" to checksum,
+            "total_chunks" to totalChunks
+        )
+        val startData = gson.toJson(startMsg).toByteArray()
+        sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, startData)
+            
+        delay(50) // Small delay before chunks
+        
+        // Send chunks
+        for (chunkIndex in 0 until totalChunks) {
+            val start = chunkIndex * chunkSize
+            val end = minOf(start + chunkSize, artData.size)
+            val chunkData = artData.copyOfRange(start, end)
+            
+            // Encode chunk to base64
+            val base64Chunk = android.util.Base64.encodeToString(chunkData, android.util.Base64.NO_WRAP)
+            
+            val chunkMsg = mapOf(
+                "type" to "test_album_art_chunk",
+                "checksum" to checksum,
+                "chunk_index" to chunkIndex,
+                "data" to base64Chunk
+            )
+            
+            val chunkMsgData = gson.toJson(chunkMsg).toByteArray()
+            sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, chunkMsgData)
+            
+            // No delay for test transfers - we want maximum speed
+            // The BLE connection parameters will handle flow control
+        }
+        
+        // Send test end message
+        val endMsg = mapOf(
+            "type" to "test_album_art_end",
+            "checksum" to checksum,
+            "success" to true
+        )
+        val endData = gson.toJson(endMsg).toByteArray()
+        sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, endData)
+        
+        debugLogger.info(
+            "TEST_ALBUM_ART_SEND",
+            "Test album art transfer complete (JSON)",
+            mapOf(
+                "checksum" to checksum,
+                "total_bytes" to artData.size.toString()
+            )
+        )
+    }
+    
+    private suspend fun sendTestAlbumArtBinary(device: BluetoothDevice, artData: ByteArray, checksum: String, trackId: String, deviceContext: DeviceContext) {
+        // For binary protocol, we don't send JSON start message - the binary protocol handles everything
+        
+        debugLogger.info(
+            "TEST_ALBUM_ART_SEND",
+            "Sending test album art using binary protocol",
+            mapOf(
+                "size" to artData.size.toString(),
+                "checksum" to checksum
+            )
+        )
+        
+        // Use binary protocol to send the actual data
+        val effectiveMtu = deviceContext.mtu - 3
+        
+        // Encode the complete transfer with test flag
+        val binaryTransfer = binaryEncoder.encodeAlbumArtTransfer(
+            imageData = artData,
+            checksum = checksum,
+            trackId = trackId,
+            mtu = deviceContext.mtu,
+            isTest = true  // Mark as test transfer
+        )
+        
+        debugLogger.info(
+            "TEST_ALBUM_ART_SEND",
+            "Binary test transfer prepared",
+            mapOf(
+                "total_chunks" to binaryTransfer.totalChunks.toString(),
+                "chunk_size" to binaryTransfer.chunkSize.toString(),
+                "compression_ratio" to String.format("%.2f", binaryTransfer.compressionRatio)
+            )
+        )
+        
+        // Track transfer start time
+        val transferStartTime = System.currentTimeMillis()
+        
+        // Send binary start using message queue with test flag
+        val startMessage = MessageQueue.Message(
+            device = device,
+            characteristicUuid = BleConstants.ALBUM_ART_TX_CHAR_UUID,
+            data = binaryTransfer.startMessage,
+            priority = MessageQueue.Priority.NORMAL,
+            isBinary = true,
+            isTestTransfer = true // Mark as test transfer for fast timing
+        )
+        messageQueue.enqueue(startMessage)
+        
+        // Send binary chunks using message queue with test flag
+        var chunksSent = 0
+        binaryTransfer.chunkMessages.forEachIndexed { index, chunkData ->
+            val chunkMessage = MessageQueue.Message(
+                device = device,
+                characteristicUuid = BleConstants.ALBUM_ART_TX_CHAR_UUID,
+                data = chunkData,
+                priority = MessageQueue.Priority.BULK,
+                isBinary = true,
+                isTestTransfer = true, // Mark as test transfer for fast timing
+                callback = { success ->
+                    if (success) {
+                        chunksSent++
+                        if (chunksSent % 10 == 0 || chunksSent == binaryTransfer.totalChunks) {
+                            val elapsed = System.currentTimeMillis() - transferStartTime
+                            val throughput = (chunksSent * binaryTransfer.chunkSize) / (elapsed / 1000.0) / 1024.0
+                            Log.d(TAG, "Test transfer progress: $chunksSent/${binaryTransfer.totalChunks} chunks, ${String.format("%.1f", throughput)} KB/s")
+                        }
+                    }
+                }
+            )
+            messageQueue.enqueue(chunkMessage)
+        }
+        
+        // Send binary end using message queue with test flag
+        val endMessage = MessageQueue.Message(
+            device = device,
+            characteristicUuid = BleConstants.ALBUM_ART_TX_CHAR_UUID,
+            data = binaryTransfer.endMessage,
+            priority = MessageQueue.Priority.BULK,
+            isBinary = true,
+            isTestTransfer = true // Mark as test transfer for fast timing
+        )
+        messageQueue.enqueue(endMessage)
+        
+        // For binary protocol, we don't send JSON end message - the binary protocol handles everything
+        
+        debugLogger.info(
+            "TEST_ALBUM_ART_SEND",
+            "Test album art transfer complete (Binary)",
+            mapOf(
+                "checksum" to checksum,
+                "total_bytes" to artData.size.toString(),
+                "total_chunks" to binaryTransfer.totalChunks.toString()
+            )
+        )
     }
     
     fun stopServer() {
@@ -1012,6 +1923,116 @@ class EnhancedBleServerManager(
         _connectionStatus.value = "Disconnected"
         _connectedDevicesList.value = emptyList()
         
+        // Stop message queue
+        if (::messageQueue.isInitialized) {
+            messageQueue.stop()
+        }
+        messageQueueScope.cancel()
+        
         Log.d(TAG, "BLE server stopped")
+    }
+    
+    fun sendTestAlbumArtCommand() {
+        messageQueueScope.launch {
+            connectedDevices.values.forEach { deviceContext ->
+                // Log connection parameters for debugging
+                debugLogger.info(
+                    "ALBUM_ART_TEST",
+                    "Initiating test album art transfer with connection info",
+                    mapOf(
+                        "device" to deviceContext.device.address,
+                        "mtu" to deviceContext.mtu.toString(),
+                        "binary_support" to deviceContext.supportsBinaryProtocol.toString(),
+                        "connection_duration_ms" to (System.currentTimeMillis() - deviceContext.connectionTime).toString()
+                    )
+                )
+                
+                handleTestAlbumArt(deviceContext.device)
+            }
+            
+            if (connectedDevices.isEmpty()) {
+                debugLogger.debug(
+                    "ALBUM_ART_TEST",
+                    "No connected devices to send test album art",
+                    mapOf()
+                )
+                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+            }
+        }
+    }
+    
+    private fun calculateSha256(data: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val hash = digest.digest(data)
+        return hash.joinToString("") { "%02x".format(it) }
+    }
+    
+    fun updateAlbumArtSettings(
+        format: String,
+        quality: Int,
+        chunkSize: Int,
+        chunkDelayMs: Int,
+        useBinaryProtocol: Boolean,
+        imageSize: Int
+    ) {
+        // Update AlbumArtManager settings
+        albumArtManager.updateSettings(
+            format = format,
+            quality = quality,
+            imageSize = imageSize
+        )
+        
+        // Update MessageQueue settings
+        if (::messageQueue.isInitialized) {
+            messageQueue.updateSettings(
+                chunkSize = chunkSize,
+                chunkDelayMs = chunkDelayMs,
+                useBinaryProtocol = useBinaryProtocol
+            )
+        }
+        
+        // Store in preferences for persistence
+        val prefs = context.getSharedPreferences("AlbumArtSettings", Context.MODE_PRIVATE)
+        prefs.edit().apply {
+            putString("imageFormat", format)
+            putInt("compressionQuality", quality)
+            putInt("chunkSize", chunkSize)
+            putInt("chunkDelayMs", chunkDelayMs)
+            putBoolean("useBinaryProtocol", useBinaryProtocol)
+            putInt("imageSize", imageSize)
+            apply()
+        }
+        
+        Log.d(TAG, "Album art settings updated - Format: $format, Quality: $quality, Size: ${imageSize}x$imageSize, ChunkSize: $chunkSize, Delay: ${chunkDelayMs}ms, Binary: $useBinaryProtocol")
+    }
+    
+    fun testAlbumArtTransfer() {
+        // Get the current playing media's album art
+        val currentMetadata = NocturneNotificationListener.activeMediaController.value?.metadata
+        if (currentMetadata != null) {
+            // Force send album art to all connected devices
+            connectedDevices.keys.forEach { device ->
+                CoroutineScope(Dispatchers.IO).launch {
+                    // Extract album art
+                    val albumArtResult = albumArtManager.extractAlbumArt(currentMetadata)
+                    if (albumArtResult != null) {
+                        val (artData, sha256Checksum) = albumArtResult
+                        
+                        val currentArtist = currentMetadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
+                        val currentAlbum = currentMetadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+                        val trackId = "$currentArtist|$currentAlbum"
+                        
+                        Log.d(TAG, "Test transfer starting - Size: ${artData.size} bytes")
+                        
+                        // Send using current settings
+                        sendAlbumArt(artData, sha256Checksum, trackId)
+                    } else {
+                        Log.w(TAG, "No album art available for test transfer")
+                    }
+                }
+            }
+        } else {
+            Log.w(TAG, "No media playing for test transfer")
+        }
     }
 }
