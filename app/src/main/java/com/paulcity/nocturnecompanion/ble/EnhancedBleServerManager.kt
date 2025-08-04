@@ -1507,8 +1507,38 @@ class EnhancedBleServerManager(
                             
                             sendAlbumArt(artData, sha256Checksum, trackId)
                         } else {
-                            // Hash matches but no art available
-                            sendNoArtAvailable(device, trackId, requestedChecksum, "No artwork in metadata")
+                            // Hash matches but no art available yet - might still be loading
+                            debugLogger.info(
+                                "ALBUM_ART_QUERY",
+                                "Hash match but no art available yet, scheduling retry",
+                                mapOf("track_id" to trackId, "retry_delay" to "100ms")
+                            )
+                            
+                            // Schedule a retry after a short delay
+                            CoroutineScope(Dispatchers.IO).launch {
+                                delay(100) // Wait for album art to potentially load
+                                
+                                // Re-check metadata
+                                val retryMetadata = NocturneNotificationListener.activeMediaController.value?.metadata
+                                if (retryMetadata != null) {
+                                    val retryResult = albumArtManager.extractAlbumArt(retryMetadata)
+                                    if (retryResult != null) {
+                                        val (artData, sha256Checksum) = retryResult
+                                        debugLogger.info(
+                                            "ALBUM_ART_QUERY",
+                                            "Retry successful - album art now available",
+                                            mapOf("size" to artData.size.toString(), "sha256" to sha256Checksum)
+                                        )
+                                        sendAlbumArt(artData, sha256Checksum, trackId)
+                                    } else {
+                                        // Still no art after retry
+                                        sendNoArtAvailable(device, trackId, requestedChecksum, "No artwork in metadata after retry")
+                                    }
+                                } else {
+                                    sendNoArtAvailable(device, trackId, requestedChecksum, "No media controller on retry")
+                                }
+                                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+                            }
                         }
                     } else {
                         // Hash mismatch - different track

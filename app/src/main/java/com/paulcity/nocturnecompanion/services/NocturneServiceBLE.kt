@@ -452,19 +452,45 @@ class NocturneServiceBLE : Service() {
                     "next" -> {
                         controller.transportControls.skipToNext()
                         Log.d(TAG, "Next command executed")
-                        // Force state update after command to get new track position
+                        
+                        // The onMetadataChanged callback will handle the track change and state update
+                        // We just need to ensure position is updated correctly
                         serviceScope.launch {
-                            delay(200) // Slightly longer delay for track changes
-                            updateMediaState(controller)
+                            delay(100) // Small delay to let the transport control take effect
+                            
+                            // Update position to ensure it's correct after skip
+                            controller.playbackState?.let { state ->
+                                val newPosition = state.position
+                                if (lastState.position_ms != newPosition) {
+                                    Log.d(TAG, "Next command - updating position to: ${newPosition}ms")
+                                    lastState.position_ms = newPosition
+                                    // Only send position update if metadata hasn't changed yet
+                                    // If metadata changed, the callback will handle the full update
+                                    sendStateUpdate()
+                                }
+                            }
                         }
                     }
                     "previous" -> {
                         controller.transportControls.skipToPrevious()
                         Log.d(TAG, "Previous command executed")
-                        // Force state update after command to get new track position
+                        
+                        // The onMetadataChanged callback will handle the track change and state update
+                        // We just need to ensure position is updated correctly
                         serviceScope.launch {
-                            delay(200) // Slightly longer delay for track changes
-                            updateMediaState(controller)
+                            delay(100) // Small delay to let the transport control take effect
+                            
+                            // Update position to ensure it's correct after skip
+                            controller.playbackState?.let { state ->
+                                val newPosition = state.position
+                                if (lastState.position_ms != newPosition) {
+                                    Log.d(TAG, "Previous command - updating position to: ${newPosition}ms")
+                                    lastState.position_ms = newPosition
+                                    // Only send position update if metadata hasn't changed yet
+                                    // If metadata changed, the callback will handle the full update
+                                    sendStateUpdate()
+                                }
+                            }
                         }
                     }
                     "seek_to" -> {
