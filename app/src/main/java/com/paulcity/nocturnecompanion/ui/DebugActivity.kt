@@ -24,12 +24,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -51,6 +53,8 @@ import com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager
 import com.paulcity.nocturnecompanion.ble.BleConstants
 import com.paulcity.nocturnecompanion.ble.MediaStoreAlbumArtManager
 import com.paulcity.nocturnecompanion.data.StateUpdate
+import com.paulcity.nocturnecompanion.data.AudioEvent
+import com.paulcity.nocturnecompanion.data.AudioEventType
 import com.paulcity.nocturnecompanion.services.NocturneServiceBLE
 import com.paulcity.nocturnecompanion.services.NocturneService
 import com.paulcity.nocturnecompanion.ui.theme.NocturneCompanionTheme
@@ -90,6 +94,7 @@ class DebugActivity : ComponentActivity() {
     private val lastCommand = mutableStateOf<String?>(null)
     private val lastStateUpdate = mutableStateOf<StateUpdate?>(null)
     private val albumArtInfo = mutableStateOf<AlbumArtInfo?>(null)
+    private val audioEvents = mutableStateListOf<AudioEvent>()
     
     data class AlbumArtInfo(
         val hasArt: Boolean,
@@ -183,6 +188,16 @@ class DebugActivity : ComponentActivity() {
                         updateAlbumArtFromMediaSession()
                     }
                 }
+                NocturneServiceBLE.ACTION_AUDIO_EVENT -> {
+                    val json = intent.getStringExtra(NocturneServiceBLE.EXTRA_AUDIO_EVENT) ?: return
+                    val audioEvent = gson.fromJson(json, AudioEvent::class.java)
+                    audioEvents.add(audioEvent)
+                    
+                    // Keep only last 500 audio events
+                    while (audioEvents.size > 500) {
+                        audioEvents.removeAt(0)
+                    }
+                }
             }
         }
     }
@@ -228,6 +243,7 @@ class DebugActivity : ComponentActivity() {
                 addAction(NocturneServiceBLE.ACTION_DEBUG_LOG)
                 addAction(NocturneServiceBLE.ACTION_COMMAND_RECEIVED)
                 addAction(NocturneServiceBLE.ACTION_STATE_UPDATED)
+                addAction(NocturneServiceBLE.ACTION_AUDIO_EVENT)
             }
             LocalBroadcastManager.getInstance(this).registerReceiver(receiver, filter)
             isReceiverRegistered = true
@@ -305,7 +321,7 @@ class DebugActivity : ComponentActivity() {
                 StatusBar()
                 
                 // Tabs
-                TabRow(selectedTabIndex = selectedTab.value) {
+                ScrollableTabRow(selectedTabIndex = selectedTab.value) {
                     Tab(
                         selected = selectedTab.value == 0,
                         onClick = { selectedTab.value = 0 },
@@ -329,7 +345,12 @@ class DebugActivity : ComponentActivity() {
                     Tab(
                         selected = selectedTab.value == 4,
                         onClick = { selectedTab.value = 4 },
-                        text = { Text("Playback") }
+                        text = { Text("Audio Events") }
+                    )
+                    Tab(
+                        selected = selectedTab.value == 5,
+                        onClick = { selectedTab.value = 5 },
+                        text = { Text("Settings") }
                     )
                 }
                 
@@ -339,7 +360,8 @@ class DebugActivity : ComponentActivity() {
                     1 -> LogsTab()
                     2 -> CommandsTab()
                     3 -> StateTab()
-                    4 -> PlaybackTab()
+                    4 -> AudioEventsTab()
+                    5 -> SettingsTab()
                 }
             }
         }
@@ -852,17 +874,559 @@ class DebugActivity : ComponentActivity() {
     }
     
     @Composable
-    fun PlaybackTab() {
-        // Track current playback state
-        var currentPosition by remember { mutableStateOf(0L) }
-        var isPlaying by remember { mutableStateOf(false) }
+    fun AudioEventsTab() {
+        val listState = rememberLazyListState()
+        var eventTypeFilter by remember { mutableStateOf<AudioEventType?>(null) }
+        var autoScrollEvents by remember { mutableStateOf(true) }
+        
+        // Extract current track info from audio events
+        // Use derivedStateOf to ensure it recomputes whenever audioEvents changes
+        val currentTrackInfo by remember {
+            derivedStateOf {
+            var artist: String? = null
+            var album: String? = null
+            var track: String? = null
+            var isPlaying = false
+            var lastPlaybackTimestamp = 0L
+            
+            // First check the last state update for base info
+            lastStateUpdate.value?.let { state ->
+                artist = state.artist
+                album = state.album
+                track = state.track
+                isPlaying = state.is_playing
+            }
+            
+            // Then go through events to find the most recent state changes
+            for (event in audioEvents.asReversed()) {
+                when (event.eventType) {
+                    AudioEventType.METADATA_CHANGED -> {
+                        if (track == null || event.timestamp > lastPlaybackTimestamp) {
+                            // Extract track name from message (e.g., "Track changed: JOAN OF ARC")
+                            val trackMatch = Regex("Track changed: (.+)").find(event.message)
+                            if (trackMatch != null) {
+                                track = trackMatch.groupValues[1]
+                            }
+                        }
+                    }
+                    AudioEventType.PLAYBACK_STATE_CHANGED -> {
+                        if (event.timestamp > lastPlaybackTimestamp) {
+                            lastPlaybackTimestamp = event.timestamp
+                            isPlaying = event.message.contains("started") || 
+                                       event.message.contains("Playback started", ignoreCase = true)
+                        }
+                    }
+                    AudioEventType.AUDIO_STARTED -> {
+                        if (event.timestamp > lastPlaybackTimestamp) {
+                            lastPlaybackTimestamp = event.timestamp
+                            isPlaying = true
+                        }
+                    }
+                    AudioEventType.AUDIO_STOPPED -> {
+                        if (event.timestamp > lastPlaybackTimestamp) {
+                            lastPlaybackTimestamp = event.timestamp
+                            isPlaying = false
+                        }
+                    }
+                    else -> {}
+                }
+            }
+            
+            CurrentTrackInfo(
+                artist = artist ?: "Unknown Artist",
+                album = album ?: "Unknown Album", 
+                track = track ?: "No Track",
+                isPlaying = isPlaying,
+                hasAlbumArt = albumArtInfo.value?.hasArt == true,
+                albumArtBitmap = albumArtInfo.value?.bitmap,
+                lastUpdateTimestamp = lastPlaybackTimestamp
+            )
+            }
+        }
+        
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Current Track Display
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (currentTrackInfo.isPlaying) 
+                        MaterialTheme.colorScheme.primaryContainer 
+                    else 
+                        MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Album Art or Placeholder
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .background(
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                                shape = RoundedCornerShape(8.dp)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        val albumArt = currentTrackInfo.albumArtBitmap
+                        if (albumArt != null) {
+                            androidx.compose.foundation.Image(
+                                bitmap = albumArt.asImageBitmap(),
+                                contentDescription = "Album Art",
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = "No Album Art",
+                                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                    }
+                    
+                    // Track Info
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = currentTrackInfo.track,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = currentTrackInfo.artist,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = currentTrackInfo.album,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        
+                        // Debug: Show last update time with auto-refresh
+                        if (currentTrackInfo.lastUpdateTimestamp > 0) {
+                            var timeSinceUpdate by remember { mutableStateOf(0L) }
+                            
+                            LaunchedEffect(currentTrackInfo.lastUpdateTimestamp) {
+                                while (true) {
+                                    timeSinceUpdate = (System.currentTimeMillis() - currentTrackInfo.lastUpdateTimestamp) / 1000
+                                    delay(1000) // Update every second
+                                }
+                            }
+                            
+                            Text(
+                                text = "Updated ${timeSinceUpdate}s ago",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
+                    
+                    // Play State Icon
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(
+                                color = if (currentTrackInfo.isPlaying)
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f),
+                                shape = CircleShape
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (currentTrackInfo.isPlaying) Icons.Default.PlayArrow else Icons.Default.Settings,
+                            contentDescription = if (currentTrackInfo.isPlaying) "Playing" else "Paused",
+                            tint = if (currentTrackInfo.isPlaying) 
+                                MaterialTheme.colorScheme.primary 
+                            else 
+                                MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
+            }
+            
+            // Controls
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Filter dropdown
+                AudioEventFilterDropdown(
+                    currentFilter = eventTypeFilter,
+                    onFilterChanged = { eventTypeFilter = it }
+                )
+                
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Auto-scroll toggle
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable {
+                            autoScrollEvents = !autoScrollEvents
+                        }
+                    ) {
+                        Checkbox(
+                            checked = autoScrollEvents,
+                            onCheckedChange = { autoScrollEvents = it }
+                        )
+                        Text("Auto-scroll", style = MaterialTheme.typography.labelMedium)
+                    }
+                    
+                    // Clear button
+                    TextButton(
+                        onClick = { audioEvents.clear() }
+                    ) {
+                        Icon(Icons.Default.Clear, contentDescription = "Clear")
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Clear")
+                    }
+                }
+            }
+            
+            HorizontalDivider()
+            
+            // Event list
+            val filteredEvents = if (eventTypeFilter == null) {
+                audioEvents
+            } else {
+                audioEvents.filter { it.eventType == eventTypeFilter }
+            }
+            
+            if (filteredEvents.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "No audio events yet",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(vertical = 8.dp)
+                ) {
+                    items(filteredEvents) { event ->
+                        AudioEventItem(event)
+                    }
+                }
+                
+                // Auto-scroll
+                LaunchedEffect(filteredEvents.size) {
+                    if (autoScrollEvents && filteredEvents.isNotEmpty()) {
+                        listState.animateScrollToItem(filteredEvents.size - 1)
+                    }
+                }
+            }
+        }
+    }
+    
+    data class CurrentTrackInfo(
+        val artist: String,
+        val album: String,
+        val track: String,
+        val isPlaying: Boolean,
+        val hasAlbumArt: Boolean,
+        val albumArtBitmap: android.graphics.Bitmap?,
+        val lastUpdateTimestamp: Long = 0
+    )
+    
+    @Composable
+    fun AudioEventFilterDropdown(
+        currentFilter: AudioEventType?,
+        onFilterChanged: (AudioEventType?) -> Unit
+    ) {
+        var expanded by remember { mutableStateOf(false) }
+        
+        Box {
+            OutlinedButton(
+                onClick = { expanded = true },
+                modifier = Modifier.width(180.dp)
+            ) {
+                Text(
+                    text = currentFilter?.name ?: "All Events",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+            }
+            
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text("All Events") },
+                    onClick = {
+                        onFilterChanged(null)
+                        expanded = false
+                    }
+                )
+                HorizontalDivider()
+                AudioEventType.values().forEach { eventType ->
+                    DropdownMenuItem(
+                        text = { Text(eventType.name.replace('_', ' ')) },
+                        onClick = {
+                            onFilterChanged(eventType)
+                            expanded = false
+                        }
+                    )
+                }
+            }
+        }
+    }
+    
+    @Composable
+    fun AudioEventItem(event: AudioEvent) {
+        val backgroundColor = when (event.eventType) {
+            AudioEventType.AUDIO_STARTED,
+            AudioEventType.AUDIO_DEVICE_CONNECTED -> Color(0xFFE8F5E9)
+            AudioEventType.AUDIO_STOPPED,
+            AudioEventType.AUDIO_DEVICE_DISCONNECTED -> Color(0xFFFFEBEE)
+            AudioEventType.METADATA_CHANGED -> Color(0xFFE3F2FD)
+            AudioEventType.PLAYBACK_STATE_CHANGED -> Color(0xFFFFF3E0)
+            AudioEventType.VOLUME_CHANGED -> Color(0xFFF3E5F5)
+            AudioEventType.PLAYBACK_CONFIG_CHANGED -> Color(0xFFF5F5F5)
+            else -> Color.Transparent
+        }
+        
+        val iconColor = when (event.eventType) {
+            AudioEventType.AUDIO_STARTED,
+            AudioEventType.AUDIO_DEVICE_CONNECTED -> Color(0xFF4CAF50)
+            AudioEventType.AUDIO_STOPPED,
+            AudioEventType.AUDIO_DEVICE_DISCONNECTED -> Color(0xFFFF5252)
+            AudioEventType.METADATA_CHANGED -> Color(0xFF2196F3)
+            AudioEventType.PLAYBACK_STATE_CHANGED -> Color(0xFFFFC107)
+            AudioEventType.VOLUME_CHANGED -> Color(0xFF9C27B0)
+            else -> Color(0xFF757575)
+        }
+        
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 2.dp),
+            color = backgroundColor,
+            shape = RoundedCornerShape(4.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Event type icon
+                        Icon(
+                            imageVector = when (event.eventType) {
+                                AudioEventType.AUDIO_STARTED -> Icons.Default.PlayArrow
+                                AudioEventType.AUDIO_STOPPED -> Icons.Default.Close
+                                AudioEventType.AUDIO_DEVICE_CONNECTED,
+                                AudioEventType.AUDIO_DEVICE_DISCONNECTED -> Icons.Default.Settings
+                                AudioEventType.METADATA_CHANGED -> Icons.Default.Info
+                                AudioEventType.PLAYBACK_STATE_CHANGED -> Icons.Default.PlayArrow
+                                AudioEventType.VOLUME_CHANGED -> Icons.Default.Settings
+                                else -> Icons.Default.Info
+                            },
+                            contentDescription = event.eventType.name,
+                            tint = iconColor,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        
+                        Text(
+                            text = event.eventType.name.replace('_', ' '),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = iconColor
+                        )
+                    }
+                    
+                    Text(
+                        text = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(event.timestamp)),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                
+                Spacer(modifier = Modifier.height(4.dp))
+                
+                Text(
+                    text = event.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                
+                // Always show current state for important events
+                if (event.eventType in listOf(
+                    AudioEventType.PLAYBACK_STATE_CHANGED,
+                    AudioEventType.METADATA_CHANGED,
+                    AudioEventType.AUDIO_STARTED,
+                    AudioEventType.AUDIO_STOPPED
+                )) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    
+                    // Show current state from lastStateUpdate
+                    lastStateUpdate.value?.let { state ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(8.dp)
+                            ) {
+                                Text(
+                                    text = "Current State:",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "${state.track ?: "Unknown"} - ${state.artist ?: "Unknown"}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Playing: ${state.is_playing} | Position: ${state.position_ms / 1000}s / ${state.duration_ms / 1000}s",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+                
+                event.details?.let { details ->
+                    Spacer(modifier = Modifier.height(4.dp))
+                    
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(8.dp)
+                        ) {
+                            details.forEach { (key, value) ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = key.replace('_', ' '),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = value.toString(),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    @Composable
+    fun SettingsTab() {
+        // Album art transfer settings
+        var imageFormat by remember { mutableStateOf("JPEG") }
+        var compressionQuality by remember { mutableStateOf(85) }
+        var chunkSize by remember { mutableStateOf(512) }
+        var chunkDelayMs by remember { mutableStateOf(5) }
+        var useBinaryProtocol by remember { mutableStateOf(true) }
+        var imageSize by remember { mutableStateOf(300) }
+        
+        // Load saved settings
+        LaunchedEffect(Unit) {
+            val prefs = getSharedPreferences("AlbumArtSettings", Context.MODE_PRIVATE)
+            imageFormat = prefs.getString("imageFormat", "JPEG") ?: "JPEG"
+            compressionQuality = prefs.getInt("compressionQuality", 85)
+            chunkSize = prefs.getInt("chunkSize", 512)
+            chunkDelayMs = prefs.getInt("chunkDelayMs", 5)
+            useBinaryProtocol = prefs.getBoolean("useBinaryProtocol", true)
+            imageSize = prefs.getInt("imageSize", 300)
+        }
+        
+        // Save settings function
+        fun saveSettings() {
+            val prefs = getSharedPreferences("AlbumArtSettings", Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                putString("imageFormat", imageFormat)
+                putInt("compressionQuality", compressionQuality)
+                putInt("chunkSize", chunkSize)
+                putInt("chunkDelayMs", chunkDelayMs)
+                putBoolean("useBinaryProtocol", useBinaryProtocol)
+                putInt("imageSize", imageSize)
+                apply()
+            }
+            
+            // Apply settings to BLE server via broadcast
+            val settingsData = mapOf(
+                "action" to "updateAlbumArtSettings",
+                "format" to imageFormat,
+                "quality" to compressionQuality,
+                "chunkSize" to chunkSize,
+                "chunkDelayMs" to chunkDelayMs,
+                "useBinaryProtocol" to useBinaryProtocol,
+                "imageSize" to imageSize
+            )
+            
+            val intent = Intent("com.paulcity.nocturnecompanion.UPDATE_ALBUM_ART_SETTINGS")
+            intent.putExtra("settings", gson.toJson(settingsData))
+            sendBroadcast(intent)
+        }
         
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(16.dp)
+                .verticalScroll(rememberScrollState())
         ) {
-            // Playback State Controls
+            // Image Format Settings
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
@@ -871,140 +1435,83 @@ class DebugActivity : ComponentActivity() {
                     modifier = Modifier.padding(16.dp)
                 ) {
                     Text(
-                        text = "Playback State Controls",
+                        text = "Image Format",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     
                     Spacer(modifier = Modifier.height(16.dp))
                     
-                    // Play/Pause buttons
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Button(
-                            onClick = {
-                                isPlaying = true
-                                sendPlaybackStateUpdate(true, currentPosition)
+                        FilterChip(
+                            selected = imageFormat == "JPEG",
+                            onClick = { 
+                                imageFormat = "JPEG"
+                                saveSettings()
                             },
-                            modifier = Modifier.weight(1f),
-                            enabled = !isPlaying
-                        ) {
-                            Icon(Icons.Default.PlayArrow, contentDescription = null)
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Play")
-                        }
+                            label = { Text("JPEG") },
+                            modifier = Modifier.weight(1f)
+                        )
                         
-                        Button(
-                            onClick = {
-                                isPlaying = false
-                                sendPlaybackStateUpdate(false, currentPosition)
+                        FilterChip(
+                            selected = imageFormat == "WEBP",
+                            onClick = { 
+                                imageFormat = "WEBP"
+                                saveSettings()
                             },
-                            modifier = Modifier.weight(1f),
-                            enabled = isPlaying
-                        ) {
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Pause")
-                        }
+                            label = { Text("WebP") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        
+                        FilterChip(
+                            selected = imageFormat == "PNG",
+                            onClick = { 
+                                imageFormat = "PNG"
+                                saveSettings()
+                            },
+                            label = { Text("PNG") },
+                            modifier = Modifier.weight(1f)
+                        )
                     }
-                    
-                    Spacer(modifier = Modifier.height(8.dp))
-                    
-                    Text(
-                        text = "Status: ${if (isPlaying) "Playing" else "Paused"}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (isPlaying) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            // Position/Seek Controls
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp)
-                ) {
-                    Text(
-                        text = "Position Controls",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
                     
                     Spacer(modifier = Modifier.height(16.dp))
                     
-                    Text("Current Position: ${currentPosition / 1000}s")
+                    Text(
+                        text = "Compression Quality: $compressionQuality%",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
                     
-                    Spacer(modifier = Modifier.height(12.dp))
-                    
-                    // Quick position buttons
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = {
-                                currentPosition = 0
-                                sendPlaybackStateUpdate(isPlaying, 0)
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("0s")
-                        }
-                        
-                        Button(
-                            onClick = {
-                                currentPosition = 30000
-                                sendPlaybackStateUpdate(isPlaying, 30000)
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("30s")
-                        }
-                        
-                        Button(
-                            onClick = {
-                                currentPosition = 60000
-                                sendPlaybackStateUpdate(isPlaying, 60000)
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("1m")
-                        }
-                        
-                        Button(
-                            onClick = {
-                                currentPosition = 300000
-                                sendPlaybackStateUpdate(isPlaying, 300000)
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("5m")
-                        }
-                    }
-                    
-                    Spacer(modifier = Modifier.height(8.dp))
-                    
-                    // Custom position slider
                     Slider(
-                        value = currentPosition.toFloat(),
-                        onValueChange = { currentPosition = it.toLong() },
-                        valueRange = 0f..600000f, // 0 to 10 minutes
+                        value = compressionQuality.toFloat(),
+                        onValueChange = { compressionQuality = it.toInt() },
+                        valueRange = 10f..100f,
+                        steps = 9,
                         modifier = Modifier.fillMaxWidth(),
-                        onValueChangeFinished = {
-                            sendPlaybackStateUpdate(isPlaying, currentPosition)
-                        }
+                        onValueChangeFinished = { saveSettings() }
+                    )
+                    
+                    Text(
+                        text = "Image Size: ${imageSize}x${imageSize}px",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    
+                    Slider(
+                        value = imageSize.toFloat(),
+                        onValueChange = { imageSize = it.toInt() },
+                        valueRange = 100f..500f,
+                        steps = 7,
+                        modifier = Modifier.fillMaxWidth(),
+                        onValueChangeFinished = { saveSettings() }
                     )
                 }
             }
             
             Spacer(modifier = Modifier.height(16.dp))
             
-            // System Controls
+            // Transfer Protocol Settings
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
@@ -1013,43 +1520,168 @@ class DebugActivity : ComponentActivity() {
                     modifier = Modifier.padding(16.dp)
                 ) {
                     Text(
-                        text = "System Controls",
+                        text = "Transfer Protocol",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     
                     Spacer(modifier = Modifier.height(16.dp))
                     
-                    // Time Sync Button
-                    Button(
-                        onClick = { sendTimeSync() },
-                        modifier = Modifier.fillMaxWidth()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Send Time Sync")
+                        Text(
+                            text = "Use Binary Protocol",
+                            modifier = Modifier.weight(1f)
+                        )
+                        
+                        Switch(
+                            checked = useBinaryProtocol,
+                            onCheckedChange = { 
+                                useBinaryProtocol = it
+                                saveSettings()
+                            }
+                        )
                     }
                     
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = if (useBinaryProtocol) "Binary protocol (faster)" else "JSON/Base64 protocol",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     
-                    // Send Full State Button (with test data)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Text(
+                        text = "Chunk Size: $chunkSize bytes",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    
+                    Slider(
+                        value = chunkSize.toFloat(),
+                        onValueChange = { chunkSize = it.toInt() },
+                        valueRange = 128f..2048f,
+                        steps = 14,
+                        modifier = Modifier.fillMaxWidth(),
+                        onValueChangeFinished = { saveSettings() }
+                    )
+                    
+                    Text(
+                        text = "Chunk Delay: ${chunkDelayMs}ms",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    
+                    Slider(
+                        value = chunkDelayMs.toFloat(),
+                        onValueChange = { chunkDelayMs = it.toInt() },
+                        valueRange = 0f..50f,
+                        steps = 9,
+                        modifier = Modifier.fillMaxWidth(),
+                        onValueChangeFinished = { saveSettings() }
+                    )
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // Test Controls
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        text = "Test Controls",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
                     Button(
                         onClick = { 
-                            sendFullStateUpdate(
-                                isPlaying = isPlaying,
-                                positionMs = currentPosition,
-                                durationMs = 300000, // 5 min
-                                artist = "Debug Artist",
-                                album = "Debug Album",
-                                track = "Debug Track",
-                                volumePercent = 75
-                            )
+                            // Send test album art command via broadcast
+                            val intent = Intent("com.paulcity.nocturnecompanion.TEST_ALBUM_ART_COMMAND")
+                            sendBroadcast(intent)
                         },
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = connectedDevices.isNotEmpty()
                     ) {
-                        Icon(Icons.Default.Send, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Send Full State (Test Data)")
+                        Text("Test Album Art Transfer")
                     }
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    Button(
+                        onClick = { 
+                            // Reset to defaults
+                            imageFormat = "JPEG"
+                            compressionQuality = 85
+                            chunkSize = 512
+                            chunkDelayMs = 5
+                            useBinaryProtocol = true
+                            imageSize = 300
+                            saveSettings()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondary
+                        )
+                    ) {
+                        Text("Reset to Defaults")
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // Info Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        text = "Transfer Statistics",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    val estimatedSize = when(imageFormat) {
+                        "JPEG" -> (imageSize * imageSize * 3 * compressionQuality / 100 / 8).toInt()
+                        "WEBP" -> (imageSize * imageSize * 3 * compressionQuality / 100 / 10).toInt()
+                        else -> imageSize * imageSize * 3
+                    }
+                    
+                    val chunksNeeded = (estimatedSize + chunkSize - 1) / chunkSize
+                    val transferTime = if (useBinaryProtocol) {
+                        chunksNeeded * chunkDelayMs
+                    } else {
+                        chunksNeeded * chunkDelayMs + (estimatedSize * 0.33).toInt() // Base64 overhead
+                    }
+                    
+                    Text(
+                        text = "Estimated file size: ${estimatedSize / 1024}KB",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "Chunks needed: $chunksNeeded",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "Estimated transfer time: ${transferTime}ms",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
                 }
             }
         }

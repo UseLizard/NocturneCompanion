@@ -35,6 +35,9 @@ import androidx.compose.ui.unit.sp
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
+import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.delay
+import androidx.core.app.NotificationManagerCompat
 import com.google.gson.JsonParser
 import com.paulcity.nocturnecompanion.services.NocturneServiceBLE
 import com.paulcity.nocturnecompanion.ui.theme.NocturneCompanionTheme
@@ -707,9 +710,16 @@ fun NotificationListenerPermissionChecker() {
    val context = LocalContext.current
    var isEnabled by remember {
        mutableStateOf(
-           Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
-               ?.contains(context.packageName) == true
+           NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
        )
+   }
+   
+   // Check periodically when the composable is active
+   LaunchedEffect(Unit) {
+       while (true) {
+           delay(1000) // Check every second
+           isEnabled = NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
+       }
    }
 
    if (!isEnabled) {

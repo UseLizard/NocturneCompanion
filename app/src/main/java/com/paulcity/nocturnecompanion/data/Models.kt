@@ -20,3 +20,25 @@ data class StateUpdate(
     var volume_percent: Int
 )
 
+// Audio event tracking
+data class AudioEvent(
+    val timestamp: Long,
+    val eventType: AudioEventType,
+    val message: String,
+    val details: Map<String, Any>? = null
+)
+
+enum class AudioEventType {
+    PLAYBACK_CONFIG_CHANGED,
+    AUDIO_DEVICE_CONNECTED,
+    AUDIO_DEVICE_DISCONNECTED,
+    MEDIA_SESSION_CREATED,
+    MEDIA_SESSION_DESTROYED,
+    METADATA_CHANGED,
+    PLAYBACK_STATE_CHANGED,
+    AUDIO_STARTED,
+    AUDIO_STOPPED,
+    VOLUME_CHANGED,
+    AUDIO_FOCUS_CHANGED
+}
+

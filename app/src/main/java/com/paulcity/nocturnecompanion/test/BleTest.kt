@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothManager
 import android.content.Context
 
 class BleTest(private val context: Context) {
+    @android.annotation.SuppressLint("MissingPermission")
     fun testApi() {
         val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         

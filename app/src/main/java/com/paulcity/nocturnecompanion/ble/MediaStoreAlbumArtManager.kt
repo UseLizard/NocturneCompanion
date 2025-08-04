@@ -31,17 +31,17 @@ class MediaStoreAlbumArtManager(private val context: Context) {
     fun getAlbumArtFromMediaStore(
         artist: String?,
         album: String?,
-        title: String?
+        title: String? = null // Not used for caching, kept for API compatibility
     ): Pair<ByteArray, String>? {
         if (album.isNullOrEmpty() && artist.isNullOrEmpty()) {
             Log.d(TAG, "No artist or album info to query MediaStore")
             return null
         }
         
-        // First check cache
-        val cacheKey = "$artist|$album|$title"
+        // First check cache using MD5 hash (matching nocturned)
+        val cacheKey = albumArtManager.generateMetadataHash(artist, album)
         albumArtManager.getArtFromCache(cacheKey)?.let { cached ->
-            Log.d(TAG, "Album art found in cache for: $cacheKey")
+            Log.d(TAG, "Album art found in cache for MD5: $cacheKey")
             return Pair(cached.data, cached.checksum)
         }
         

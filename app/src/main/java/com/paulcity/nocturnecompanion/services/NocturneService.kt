@@ -20,7 +20,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.gson.Gson
-import com.paulcity.nocturnecompanion.services.AlbumArtManager
+// AlbumArtManager is now handled by the BLE implementation
 import com.paulcity.nocturnecompanion.data.Command
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager
@@ -33,7 +33,7 @@ class NocturneService : Service() {
    private lateinit var bluetoothServerManager: BluetoothServerManager
    private lateinit var bleServerManager: EnhancedBleServerManager
    private lateinit var audioManager: AudioManager
-   private lateinit var albumArtManager: AlbumArtManager
+   // Album art is now managed by EnhancedBleServerManager
    private val gson = Gson()
    
    private val testingMode = true 
@@ -101,16 +101,9 @@ class NocturneService : Service() {
            lastState.track = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)
            lastState.duration_ms = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0
            
-           // Process album art in background
-           serviceScope.launch {
-               try {
-                   // Send album art via BLE
-                   val trackId = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: "unknown"
-                   bleServerManager.sendAlbumArtFromMetadata(metadata, trackId)
-               } catch (e: Exception) {
-                   Log.w("NocturneService", "Failed to process album art", e)
-               }
-           }
+           // Album art is now sent only when requested by nocturned via album_art_query
+           // This follows the nocturned cheatsheet protocol where nocturned checks its cache
+           // and only requests album art when needed
            
            // Send full state update on track change
            if (trackChanged) {
@@ -169,8 +162,8 @@ class NocturneService : Service() {
            audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
            Log.d("NocturneService", "AudioManager initialized")
            
-           albumArtManager = AlbumArtManager(this)
-           Log.d("NocturneService", "AlbumArtManager initialized")
+           // Album art is now managed by EnhancedBleServerManager
+           // which uses the proper AlbumArtManager from the ble package
            
            createNotificationChannel()
            Log.d("NocturneService", "Notification channel created")

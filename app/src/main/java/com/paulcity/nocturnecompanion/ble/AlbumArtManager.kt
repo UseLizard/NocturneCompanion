@@ -7,6 +7,7 @@ import android.util.Log
 import android.util.LruCache
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
+import java.util.Locale
 
 /**
  * Manages album art extraction, compression, and caching for BLE transfer
@@ -17,6 +18,11 @@ class AlbumArtManager {
         private const val CACHE_SIZE = 10 * 1024 * 1024 // 10MB cache
     }
     
+    // Configurable settings
+    private var imageFormat = "JPEG"
+    private var compressionQuality = 85
+    private var imageSize = 300
+    
     // LRU cache for compressed album art
     private val albumArtCache = object : LruCache<String, CachedAlbumArt>(CACHE_SIZE) {
         override fun sizeOf(key: String, value: CachedAlbumArt): Int {
@@ -25,6 +31,14 @@ class AlbumArtManager {
     }
 
     fun getArtFromCache(cacheKey: String): CachedAlbumArt? {
+        return albumArtCache.get(cacheKey)
+    }
+    
+    /**
+     * Get album art by artist and album, using MD5 hash as cache key
+     */
+    fun getArtByMetadata(artist: String?, album: String?): CachedAlbumArt? {
+        val cacheKey = generateMetadataHash(artist, album)
         return albumArtCache.get(cacheKey)
     }
     
@@ -45,6 +59,24 @@ class AlbumArtManager {
     }
     
     /**
+     * Generate MD5 hash from artist and album names (matching nocturned's algorithm)
+     * This creates a unique identifier for caching based on metadata
+     */
+    fun generateMetadataHash(artist: String?, album: String?): String {
+        // Normalize strings: lowercase, trim spaces (matching nocturned)
+        val normalizedArtist = (artist ?: "").trim().lowercase(Locale.ROOT)
+        val normalizedAlbum = (album ?: "").trim().lowercase(Locale.ROOT)
+        
+        // Combine artist and album with hyphen (matching nocturned)
+        val combined = "$normalizedArtist-$normalizedAlbum"
+        
+        // Generate MD5 hash
+        val md = MessageDigest.getInstance("MD5")
+        val digest = md.digest(combined.toByteArray())
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+    
+    /**
      * Extract and process album art from MediaMetadata
      * @return Compressed WebP byte array and checksum, or null if no art available
      */
@@ -54,11 +86,12 @@ class AlbumArtManager {
             return null
         }
         
-        // Generate cache key from track info
+        // Generate cache key from track info using MD5 hash (matching nocturned)
         val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
         val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
-        val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
-        val cacheKey = "$artist|$album|$title"
+        
+        // Use MD5 hash of artist-album as cache key
+        val cacheKey = generateMetadataHash(artist, album)
         
         // Check cache first
         albumArtCache.get(cacheKey)?.let { cached ->
@@ -80,33 +113,32 @@ class AlbumArtManager {
         
         try {
             // Create square 300x300 bitmap
-            val squareBitmap = createSquareBitmap(bitmap, BleConstants.ALBUM_ART_TARGET_SIZE)
+            val squareBitmap = createSquareBitmap(bitmap, imageSize)
             Log.d(TAG, "Square bitmap size: ${squareBitmap.width}x${squareBitmap.height}")
             
-            // Compress to WebP
+            // Compress using configured format and quality
             val outputStream = ByteArrayOutputStream()
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                // Use lossy WebP for better compression on Android 11+
-                squareBitmap.compress(Bitmap.CompressFormat.WEBP_LOSSY, BleConstants.ALBUM_ART_WEBP_QUALITY, outputStream)
-            } else {
-                // Fallback to standard WebP on older versions
-                @Suppress("DEPRECATION")
-                squareBitmap.compress(Bitmap.CompressFormat.WEBP, BleConstants.ALBUM_ART_WEBP_QUALITY, outputStream)
+            val compressFormat = when(imageFormat) {
+                "WEBP" -> Bitmap.CompressFormat.WEBP
+                "PNG" -> Bitmap.CompressFormat.PNG
+                else -> Bitmap.CompressFormat.JPEG
             }
-            val webpData = outputStream.toByteArray()
+            squareBitmap.compress(compressFormat, compressionQuality, outputStream)
+            val imageData = outputStream.toByteArray()
             
             // Calculate checksum
-            val checksum = calculateChecksum(webpData)
+            val checksum = calculateChecksum(imageData)
             
-            Log.d(TAG, "Compressed album art size: ${webpData.size} bytes (WebP), checksum: $checksum")
+            Log.d(TAG, "Compressed album art size: ${imageData.size} bytes ($imageFormat), SHA-256: $checksum")
+            Log.d(TAG, "Caching with MD5 hash: $cacheKey for $artist - $album")
             
             // Cache the result
-            albumArtCache.put(cacheKey, CachedAlbumArt(webpData, checksum))
+            albumArtCache.put(cacheKey, CachedAlbumArt(imageData, checksum))
             
             // Clean up
             squareBitmap.recycle()
             
-            return Pair(webpData, checksum)
+            return Pair(imageData, checksum)
             
         } catch (e: Exception) {
             Log.e(TAG, "Error processing album art", e)
@@ -163,5 +195,19 @@ class AlbumArtManager {
      */
     fun getCacheSize(): Int {
         return albumArtCache.size()
+    }
+    
+    /**
+     * Update album art compression settings
+     */
+    fun updateSettings(format: String, quality: Int, imageSize: Int) {
+        this.imageFormat = format
+        this.compressionQuality = quality
+        this.imageSize = imageSize
+        
+        // Clear cache when settings change to ensure new format is used
+        clearCache()
+        
+        Log.d(TAG, "Settings updated - Format: $format, Quality: $quality, Size: ${imageSize}x$imageSize")
     }
 }

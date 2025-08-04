@@ -28,7 +28,8 @@ object BleConstants {
     
     // Album Art
     const val ALBUM_ART_TARGET_SIZE = 300 // Target size for square album art
-    const val ALBUM_ART_WEBP_QUALITY = 80 // WebP quality (0-100)
+    const val ALBUM_ART_WEBP_QUALITY = 35 // WebP quality (0-100)
+    const val ALBUM_ART_JPEG_QUALITY = 35 // JPEG quality for faster decoding
     
     // Album Art Transfer Configuration
     const val ALBUM_ART_CHUNK_SIZE = TARGET_MTU - MTU_HEADER_SIZE // 509 bytes per chunk

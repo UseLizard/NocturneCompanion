@@ -36,6 +36,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
 import java.security.MessageDigest
 import java.io.ByteArrayOutputStream
+import java.util.TimeZone
 import kotlinx.coroutines.channels.Channel
 
 /**
@@ -51,7 +52,8 @@ import kotlinx.coroutines.channels.Channel
 class EnhancedBleServerManager(
     private val context: Context,
     private val onCommandReceived: (Command) -> Unit,
-    private val onDeviceConnected: ((BluetoothDevice) -> Unit)? = null
+    private val onDeviceConnected: ((BluetoothDevice) -> Unit)? = null,
+    private val onDeviceReady: ((BluetoothDevice) -> Unit)? = null
 ) {
     companion object {
         private const val TAG = "EnhancedBleServer"
@@ -509,6 +511,45 @@ class EnhancedBleServerManager(
                             val ackData = gson.toJson(ack).toByteArray()
                             sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, ackData)
                         }
+                        "request_time_sync" -> {
+                            // Handle explicit time sync request
+                            val timeSync = mapOf(
+                                "type" to "timeSync",
+                                "timestamp_ms" to System.currentTimeMillis(),
+                                "timezone" to TimeZone.getDefault().id
+                            )
+                            val timeSyncData = gson.toJson(timeSync).toByteArray()
+                            
+                            // Send with HIGH priority since time sync is important
+                            val message = MessageQueue.Message(
+                                device = device,
+                                characteristicUuid = BleConstants.STATE_TX_CHAR_UUID,
+                                data = timeSyncData,
+                                priority = MessageQueue.Priority.HIGH
+                            )
+                            messageQueue.enqueue(message)
+                            
+                            debugLogger.info(
+                                "TIME_SYNC",
+                                "Time sync sent in response to request",
+                                mapOf(
+                                    "device" to device.address,
+                                    "timestamp" to System.currentTimeMillis(),
+                                    "timezone" to TimeZone.getDefault().id
+                                )
+                            )
+                        }
+                        "request_track_refresh" -> {
+                            // Handle explicit request to refresh track data
+                            // Forward to the service to send current media state
+                            onCommandReceived(command)
+                            
+                            debugLogger.info(
+                                "TRACK_REFRESH",
+                                "Track refresh requested",
+                                mapOf("device" to device.address)
+                            )
+                        }
                         else -> {
                             // Regular command
                             onCommandReceived(command)
@@ -576,6 +617,16 @@ class EnhancedBleServerManager(
                         "Notifications enabled",
                         mapOf("char" to charUuid.toString(), "device" to device.address)
                     )
+                    
+                    // Check if device is now ready (both STATE_TX and ALBUM_ART_TX subscribed)
+                    val subscriptions = connectedDevices[device.address]?.subscriptions ?: mutableSetOf()
+                    val hasStateTx = subscriptions.contains(BleConstants.STATE_TX_CHAR_UUID.toString())
+                    val hasAlbumArtTx = subscriptions.contains(BleConstants.ALBUM_ART_TX_CHAR_UUID.toString())
+                    
+                    if (hasStateTx && hasAlbumArtTx) {
+                        Log.d(TAG, "Device ${device.address} is now ready with all required subscriptions")
+                        onDeviceReady?.invoke(device)
+                    }
                 } else {
                     connectedDevices[device.address]?.subscriptions?.remove(charUuid.toString())
                     Log.d(TAG, "Notifications disabled for $charUuid")
@@ -708,7 +759,9 @@ class EnhancedBleServerManager(
     }
     
     fun sendStateUpdate(data: Any) {
+        Log.d(TAG, "sendStateUpdate called with data type: ${data::class.simpleName}")
         val json = gson.toJson(data)
+        Log.d(TAG, "JSON to send: $json")
         
         debugLogger.verbose(
             "STATE_SENT",
@@ -724,7 +777,9 @@ class EnhancedBleServerManager(
             else -> MessageQueue.Priority.NORMAL
         }
         
+        Log.d(TAG, "About to call sendNotificationToAll with priority: $priority")
         sendNotificationToAll(BleConstants.STATE_TX_CHAR_UUID, json, priority)
+        Log.d(TAG, "sendNotificationToAll completed")
         
         CoroutineScope(Dispatchers.IO).launch {
             _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
@@ -734,7 +789,10 @@ class EnhancedBleServerManager(
     private fun sendNotificationToAll(characteristicUuid: UUID, data: String, priority: MessageQueue.Priority = MessageQueue.Priority.NORMAL) {
         val dataBytes = data.toByteArray(Charsets.UTF_8)
         
+        Log.d(TAG, "sendNotificationToAll: ${connectedDevices.size} connected devices, sending to char: $characteristicUuid")
+        
         connectedDevices.values.forEach { context ->
+            Log.d(TAG, "Device ${context.device.address} subscriptions: ${context.subscriptions}")
             if (context.subscriptions.contains(characteristicUuid.toString())) {
                 // Queue the message instead of sending directly
                 val message = MessageQueue.Message(
@@ -746,7 +804,11 @@ class EnhancedBleServerManager(
                 
                 if (!messageQueue.enqueue(message)) {
                     Log.w(TAG, "Failed to enqueue message for ${context.device.address} - queue full")
+                } else {
+                    Log.d(TAG, "Message enqueued for ${context.device.address}")
                 }
+            } else {
+                Log.w(TAG, "Device ${context.device.address} not subscribed to ${characteristicUuid}")
             }
         }
     }
