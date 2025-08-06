@@ -20,6 +20,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.gson.Gson
+import com.paulcity.nocturnecompanion.ble.BinaryProtocol
 import com.paulcity.nocturnecompanion.data.Command
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import com.paulcity.nocturnecompanion.data.AudioEvent
@@ -211,6 +212,11 @@ class NocturneServiceBLE : Service() {
     private var lastSentTimestamp = 0L
     private val MIN_UPDATE_INTERVAL_MS = 500L // Don't send updates more frequently than this
     private val POSITION_UPDATE_THRESHOLD_MS = 5000L // Only send position updates if changed by more than 5 seconds
+    
+    // For binary incremental updates
+    private var previousBinaryState: StateUpdate? = null
+    private val POSITION_CHANGE_THRESHOLD_MS = 15000L // 15 seconds for significant position change
+    private var useBinaryIncrementalUpdates = false // Will be enabled after protocol negotiation
 
     companion object {
         private const val TAG = "NocturneServiceBLE"
@@ -406,6 +412,26 @@ class NocturneServiceBLE : Service() {
         
         // Handle commands that don't require a media controller
         when (command.command) {
+            "get_capabilities" -> {
+                // Respond with capabilities including binary incremental updates
+                Log.d(TAG, "Capabilities requested - sending response")
+                val capabilities = mapOf(
+                    "binary_protocol" to true,
+                    "incremental_updates" to true,
+                    "album_art" to true,
+                    "version" to "2.0.0"
+                )
+                bleServerManager.sendResponse(gson.toJson(capabilities))
+                return
+            }
+            "enable_binary_incremental" -> {
+                // Enable binary incremental updates
+                Log.d(TAG, "Enabling binary incremental updates")
+                useBinaryIncrementalUpdates = true
+                previousBinaryState = null // Reset to force initial full update
+                bleServerManager.sendResponse(gson.toJson(mapOf("binary_incremental_enabled" to true)))
+                return
+            }
             "request_track_refresh" -> {
                 // Force immediate state update
                 Log.d(TAG, "Track refresh requested - sending current state")
@@ -736,8 +762,13 @@ class NocturneServiceBLE : Service() {
         try {
             val now = System.currentTimeMillis()
             
-            // Send via BLE
-            bleServerManager.sendStateUpdate(lastState)
+            // Check if we should use incremental binary updates
+            if (useBinaryIncrementalUpdates && previousBinaryState != null) {
+                sendIncrementalBinaryUpdates()
+            } else {
+                // Send full state update via BLE
+                bleServerManager.sendStateUpdate(lastState)
+            }
             
             // Broadcast locally
             val intent = Intent(ACTION_STATE_UPDATED)
@@ -750,9 +781,73 @@ class NocturneServiceBLE : Service() {
             // Update last sent state
             lastSentState = lastState.copy()
             lastSentTimestamp = now
+            previousBinaryState = lastState.copy()
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send state update", e)
+        }
+    }
+    
+    private suspend fun sendIncrementalBinaryUpdates() {
+        val previous = previousBinaryState ?: return
+        val current = lastState
+        
+        // Check what changed and send only those updates
+        
+        // Artist or Album changed - send as combined update
+        if (current.artist != previous.artist || current.album != previous.album) {
+            Log.d(TAG, "BLE_LOG: Sending combined artist+album update: ${current.artist} / ${current.album}")
+            bleServerManager.sendIncrementalUpdate(
+                BinaryProtocol.MSG_STATE_ARTIST_ALBUM,
+                Pair(current.artist ?: "", current.album ?: "")
+            )
+        }
+        
+        // Track changed
+        if (current.track != previous.track) {
+            Log.d(TAG, "BLE_LOG: Sending incremental track update: ${current.track}")
+            bleServerManager.sendIncrementalUpdate(
+                BinaryProtocol.MSG_STATE_TRACK,
+                current.track ?: ""
+            )
+        }
+        
+        // Duration changed
+        if (current.duration_ms != previous.duration_ms) {
+            Log.d(TAG, "BLE_LOG: Sending incremental duration update: ${current.duration_ms}ms")
+            bleServerManager.sendIncrementalUpdate(
+                BinaryProtocol.MSG_STATE_DURATION,
+                current.duration_ms
+            )
+        }
+        
+        // Position changed significantly
+        val positionDiff = kotlin.math.abs(current.position_ms - previous.position_ms)
+        val positionReset = current.position_ms <= 2000 && previous.position_ms > 2000
+        if (positionDiff >= POSITION_CHANGE_THRESHOLD_MS || positionReset) {
+            Log.d(TAG, "BLE_LOG: Sending incremental position update: ${current.position_ms}ms (diff: $positionDiff, reset: $positionReset)")
+            bleServerManager.sendIncrementalUpdate(
+                BinaryProtocol.MSG_STATE_POSITION,
+                current.position_ms
+            )
+        }
+        
+        // Play state changed
+        if (current.is_playing != previous.is_playing) {
+            Log.d(TAG, "BLE_LOG: Sending incremental play state update: ${current.is_playing}")
+            bleServerManager.sendIncrementalUpdate(
+                BinaryProtocol.MSG_STATE_PLAY_STATE,
+                current.is_playing
+            )
+        }
+        
+        // Volume changed
+        if (current.volume_percent != previous.volume_percent) {
+            Log.d(TAG, "BLE_LOG: Sending incremental volume update: ${current.volume_percent}%")
+            bleServerManager.sendIncrementalUpdate(
+                BinaryProtocol.MSG_STATE_VOLUME,
+                current.volume_percent.toByte()
+            )
         }
     }
     

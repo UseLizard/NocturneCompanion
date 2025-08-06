@@ -24,6 +24,17 @@ object BinaryProtocol {
     const val MSG_TEST_ALBUM_ART_CHUNK: Short = 0x0201
     const val MSG_TEST_ALBUM_ART_END: Short = 0x0202
     
+    // Incremental state update message types
+    const val MSG_STATE_ARTIST: Short = 0x0300  // Deprecated - use MSG_STATE_ARTIST_ALBUM
+    const val MSG_STATE_ALBUM: Short = 0x0301   // Deprecated - use MSG_STATE_ARTIST_ALBUM
+    const val MSG_STATE_TRACK: Short = 0x0302
+    const val MSG_STATE_POSITION: Short = 0x0303
+    const val MSG_STATE_DURATION: Short = 0x0304
+    const val MSG_STATE_PLAY_STATE: Short = 0x0305
+    const val MSG_STATE_VOLUME: Short = 0x0306
+    const val MSG_STATE_FULL: Short = 0x0307
+    const val MSG_STATE_ARTIST_ALBUM: Short = 0x0308  // Combined artist+album update
+    
     // Binary header size
     const val HEADER_SIZE = 16  // bytes
     
@@ -211,5 +222,93 @@ object BinaryProtocol {
      */
     fun bytesToHex(bytes: ByteArray): String {
         return bytes.joinToString("") { "%02x".format(it) }
+    }
+    
+    /**
+     * Incremental state update payloads
+     */
+    
+    // String payload for artist/album/track updates
+    fun createStringPayload(value: String): ByteArray {
+        return value.toByteArray(Charsets.UTF_8)
+    }
+    
+    // Long payload for position/duration updates (8 bytes)
+    fun createLongPayload(value: Long): ByteArray {
+        return ByteBuffer.allocate(8).apply {
+            order(ByteOrder.BIG_ENDIAN)
+            putLong(value)
+        }.array()
+    }
+    
+    // Boolean payload for play state (1 byte)
+    fun createBooleanPayload(value: Boolean): ByteArray {
+        return byteArrayOf(if (value) 1 else 0)
+    }
+    
+    // Byte payload for volume percentage (1 byte)
+    fun createBytePayload(value: Byte): ByteArray {
+        return byteArrayOf(value)
+    }
+    
+    // Parse payloads
+    fun parseStringPayload(data: ByteArray): String {
+        return String(data, Charsets.UTF_8)
+    }
+    
+    fun parseLongPayload(data: ByteArray): Long {
+        require(data.size >= 8) { "Invalid long payload size" }
+        return ByteBuffer.wrap(data).apply {
+            order(ByteOrder.BIG_ENDIAN)
+        }.getLong()
+    }
+    
+    fun parseBooleanPayload(data: ByteArray): Boolean {
+        require(data.isNotEmpty()) { "Invalid boolean payload size" }
+        return data[0] != 0.toByte()
+    }
+    
+    fun parseBytePayload(data: ByteArray): Byte {
+        require(data.isNotEmpty()) { "Invalid byte payload size" }
+        return data[0]
+    }
+    
+    /**
+     * Combined artist+album payload
+     * Format: [artist_length:2][artist:N][album_length:2][album:M]
+     */
+    fun createArtistAlbumPayload(artist: String, album: String): ByteArray {
+        val artistBytes = artist.toByteArray(Charsets.UTF_8)
+        val albumBytes = album.toByteArray(Charsets.UTF_8)
+        
+        return ByteBuffer.allocate(4 + artistBytes.size + albumBytes.size).apply {
+            order(ByteOrder.BIG_ENDIAN)
+            putShort(artistBytes.size.toShort())
+            put(artistBytes)
+            putShort(albumBytes.size.toShort())
+            put(albumBytes)
+        }.array()
+    }
+    
+    fun parseArtistAlbumPayload(data: ByteArray): Pair<String, String> {
+        require(data.size >= 4) { "Invalid artist+album payload size" }
+        
+        val buffer = ByteBuffer.wrap(data).apply {
+            order(ByteOrder.BIG_ENDIAN)
+        }
+        
+        // Read artist
+        val artistLength = buffer.getShort().toInt()
+        val artistBytes = ByteArray(artistLength)
+        buffer.get(artistBytes)
+        val artist = String(artistBytes, Charsets.UTF_8)
+        
+        // Read album
+        val albumLength = buffer.getShort().toInt()
+        val albumBytes = ByteArray(albumLength)
+        buffer.get(albumBytes)
+        val album = String(albumBytes, Charsets.UTF_8)
+        
+        return Pair(artist, album)
     }
 }

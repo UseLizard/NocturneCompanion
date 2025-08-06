@@ -2059,6 +2059,71 @@ class EnhancedBleServerManager(
         return hash.joinToString("") { "%02x".format(it) }
     }
     
+    fun sendResponse(response: String) {
+        // Send response to all connected devices via ResponseTx characteristic
+        connectedDevices.values.forEach { deviceContext ->
+            val message = MessageQueue.Message(
+                device = deviceContext.device,
+                characteristicUuid = BleConstants.STATE_TX_CHAR_UUID,
+                data = response.toByteArray(),
+                priority = MessageQueue.Priority.HIGH
+            )
+            messageQueue.enqueue(message)
+        }
+    }
+    
+    fun sendIncrementalUpdate(messageType: Short, value: Any) {
+        // Create binary payload based on value type
+        val payload = when (value) {
+            is String -> BinaryProtocol.createStringPayload(value)
+            is Long -> BinaryProtocol.createLongPayload(value)
+            is Boolean -> BinaryProtocol.createBooleanPayload(value)
+            is Byte -> BinaryProtocol.createBytePayload(value)
+            is Pair<*, *> -> {
+                // Handle artist+album pair
+                val artist = value.first as? String ?: ""
+                val album = value.second as? String ?: ""
+                BinaryProtocol.createArtistAlbumPayload(artist, album)
+            }
+            else -> {
+                Log.e(TAG, "Unsupported incremental update type: ${value::class.simpleName}")
+                return
+            }
+        }
+        
+        // Create binary message with header
+        val header = BinaryProtocol.BinaryHeader(
+            messageType = messageType,
+            chunkIndex = 0,
+            totalSize = payload.size
+        )
+        
+        val binaryMessage = BinaryProtocol.createBinaryMessage(header, payload)
+        
+        // Send to all connected devices
+        connectedDevices.values.forEach { deviceContext ->
+            if (deviceContext.supportsBinaryProtocol) {
+                val message = MessageQueue.Message(
+                    device = deviceContext.device,
+                    characteristicUuid = BleConstants.STATE_TX_CHAR_UUID,
+                    data = binaryMessage,
+                    priority = MessageQueue.Priority.HIGH,
+                    isBinary = true
+                )
+                messageQueue.enqueue(message)
+                
+                debugLogger.verbose(
+                    "INCREMENTAL_UPDATE",
+                    "Sent binary incremental update",
+                    mapOf(
+                        "type" to messageType.toString(),
+                        "size" to binaryMessage.size.toString()
+                    )
+                )
+            }
+        }
+    }
+    
     fun updateAlbumArtSettings(
         format: String,
         quality: Int,
