@@ -506,7 +506,8 @@ class NocturneServiceBLE : Service() {
                             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVolume, 0)
                             
                             lastState.volume_percent = percent
-                            sendStateUpdate()
+                            // Don't send state update for volume changes - the UI already knows
+                            // sendStateUpdate()
                             
                             Log.d(TAG, "Volume set to $percent% (raw: $targetVolume/$maxVolume)")
                         }
