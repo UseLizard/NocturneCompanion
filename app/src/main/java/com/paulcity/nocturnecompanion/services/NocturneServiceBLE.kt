@@ -851,6 +851,7 @@ class NocturneServiceBLE : Service() {
             
             Log.d(TAG, "State update sent: ${lastState.track} - playing: ${lastState.is_playing}, position: ${lastState.position_ms}ms")
             Log.d(TAG, "Sent to nocturned - Track: ${lastState.track}, Playing: ${lastState.is_playing}, Audio Actually Playing: $isAudioActuallyPlaying")
+            Log.d(TAG, "BLE_LOG: state_sent - Time since last: ${now - lastSentTimestamp}ms")
             
             // Update last sent state
             lastSentState = lastState.copy()
@@ -932,8 +933,22 @@ class NocturneServiceBLE : Service() {
         // Always send if no previous state was sent
         val previousState = lastSentState ?: return true
         
-        // Only apply time filtering for position-only updates
         val now = System.currentTimeMillis()
+        
+        // Check if the state is exactly the same as the last sent state
+        val isIdenticalState = lastState.track == previousState.track &&
+            lastState.artist == previousState.artist &&
+            lastState.album == previousState.album &&
+            lastState.is_playing == previousState.is_playing &&
+            lastState.duration_ms == previousState.duration_ms &&
+            lastState.position_ms == previousState.position_ms &&
+            lastState.volume_percent == previousState.volume_percent
+        
+        // If state is identical and was sent less than 1 second ago, skip it
+        if (isIdenticalState && (now - lastSentTimestamp < 1000L)) {
+            Log.d(TAG, "Skipping duplicate state update (sent ${now - lastSentTimestamp}ms ago)")
+            return false
+        }
         
         // Check if only position changed
         val onlyPositionChanged = lastState.track == previousState.track &&
@@ -956,7 +971,24 @@ class NocturneServiceBLE : Service() {
             }
         }
         
-        // For all other changes (track, play state, volume), send immediately
+        // For all other changes (track, play state, volume), check for rapid duplicates
+        // Even for meaningful changes, prevent sending the exact same update within 1 second
+        if (now - lastSentTimestamp < 1000L) {
+            // Check if this is a duplicate of what we just sent
+            val isDuplicate = lastState.track == previousState.track &&
+                lastState.artist == previousState.artist &&
+                lastState.album == previousState.album &&
+                lastState.is_playing == previousState.is_playing &&
+                kotlin.math.abs(lastState.position_ms - previousState.position_ms) < 1000 && // Allow small position drift
+                lastState.volume_percent == previousState.volume_percent
+            
+            if (isDuplicate) {
+                Log.d(TAG, "Skipping rapid duplicate state update (${now - lastSentTimestamp}ms since last)")
+                return false
+            }
+        }
+        
+        // Send the update
         return true
     }
     
