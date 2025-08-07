@@ -1614,7 +1614,7 @@ class EnhancedBleServerManager(
             
             // Add delay between chunks to prevent buffer overflow
             // Adjust delay based on chunk size - larger chunks need more time
-            val delayMs = when {
+            /*val delayMs = when {
                 binaryTransfer.chunkSize > 400 -> 100L  // Large chunks need more spacing
                 binaryTransfer.chunkSize > 200 -> 75L   // Medium chunks
                 else -> 50L                             // Small chunks (still need good spacing)
@@ -1622,7 +1622,7 @@ class EnhancedBleServerManager(
             
             if (index > 0) {
                 delay(delayMs)
-            }
+            }*/
             
             val chunkMessage = MessageQueue.Message(
                 device = device,
