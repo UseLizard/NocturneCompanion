@@ -35,23 +35,24 @@ class BinaryAlbumArtEncoder {
     ): ByteArray {
         val totalChunks = (imageData.size + chunkSize - 1) / chunkSize
         
-        // Convert hex checksum to bytes
-        val checksumBytes = BinaryProtocol.hexToBytes(checksum)
+        // Convert hex checksum to bytes (SHA-256 should be 32 bytes)
+        val checksumBytes = BinaryProtocolV2.hexToBytes(checksum)
         
-        val payload = BinaryProtocol.AlbumArtStartPayload(
+        // Create payload using BinaryProtocolV2
+        val payload = BinaryProtocolV2.AlbumArtStartPayload(
             checksum = checksumBytes,
             totalChunks = totalChunks,
             imageSize = imageData.size,
             trackId = trackId
         )
         
-        val header = BinaryProtocol.BinaryHeader(
-            messageType = if (isTest) BinaryProtocol.MSG_TEST_ALBUM_ART_START else BinaryProtocol.MSG_ALBUM_ART_START
-        )
+        // Use BinaryProtocolV2 message types (0x03xx range)
+        val messageType = if (isTest) BinaryProtocolV2.MSG_TEST_ALBUM_ART_START else BinaryProtocolV2.MSG_ALBUM_ART_START
         
-        Log.d(TAG, "Encoding ${if (isTest) "test " else ""}album art start - Size: ${imageData.size}, Chunks: $totalChunks, Binary payload: ${payload.toByteArray().size} bytes")
+        Log.d(TAG, "Encoding ${if (isTest) "test " else ""}album art start - Type: 0x${messageType.toString(16)}, Size: ${imageData.size}, Chunks: $totalChunks")
         
-        return BinaryProtocol.createBinaryMessage(header, payload.toByteArray())
+        // Create message using BinaryProtocolV2
+        return BinaryProtocolV2.createMessage(messageType, payload.toByteArray())
     }
     
     /**
@@ -62,13 +63,13 @@ class BinaryAlbumArtEncoder {
         chunkIndex: Int,
         isTest: Boolean = false
     ): ByteArray {
-        val header = BinaryProtocol.BinaryHeader(
-            messageType = if (isTest) BinaryProtocol.MSG_TEST_ALBUM_ART_CHUNK else BinaryProtocol.MSG_ALBUM_ART_CHUNK,
-            chunkIndex = chunkIndex.toShort()
-        )
+        // Use BinaryProtocolV2 message types (0x03xx range)
+        val messageType = if (isTest) BinaryProtocolV2.MSG_TEST_ALBUM_ART_CHUNK else BinaryProtocolV2.MSG_ALBUM_ART_CHUNK
         
-        // For chunks, the payload is just the raw image data
-        return BinaryProtocol.createBinaryMessage(header, chunkData)
+        // Like the legacy protocol, put chunk index in header, not payload
+        // The payload is just the raw chunk data
+        // Pass chunkIndex as the MessageID field in the header
+        return BinaryProtocolV2.createMessage(messageType, chunkData, chunkIndex.toShort())
     }
     
     /**
@@ -79,18 +80,22 @@ class BinaryAlbumArtEncoder {
         success: Boolean,
         isTest: Boolean = false
     ): ByteArray {
-        val checksumBytes = BinaryProtocol.hexToBytes(checksum)
+        // Convert hex checksum to bytes (SHA-256 should be 32 bytes)
+        val checksumBytes = BinaryProtocolV2.hexToBytes(checksum)
         
-        val payload = BinaryProtocol.AlbumArtEndPayload(
+        // Create payload using BinaryProtocolV2
+        val payload = BinaryProtocolV2.AlbumArtEndPayload(
             checksum = checksumBytes,
             success = success
         )
         
-        val header = BinaryProtocol.BinaryHeader(
-            messageType = if (isTest) BinaryProtocol.MSG_TEST_ALBUM_ART_END else BinaryProtocol.MSG_ALBUM_ART_END
-        )
+        // Use BinaryProtocolV2 message types (0x03xx range)
+        val messageType = if (isTest) BinaryProtocolV2.MSG_TEST_ALBUM_ART_END else BinaryProtocolV2.MSG_ALBUM_ART_END
         
-        return BinaryProtocol.createBinaryMessage(header, payload.toByteArray())
+        Log.d(TAG, "Encoding ${if (isTest) "test " else ""}album art end - Type: 0x${messageType.toString(16)}, Success: $success")
+        
+        // Create message using BinaryProtocolV2
+        return BinaryProtocolV2.createMessage(messageType, payload.toByteArray())
     }
     
     /**

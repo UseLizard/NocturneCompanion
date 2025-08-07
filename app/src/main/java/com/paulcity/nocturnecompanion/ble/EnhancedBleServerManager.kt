@@ -30,6 +30,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlin.coroutines.coroutineContext
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -74,7 +76,7 @@ class EnhancedBleServerManager(
     val connectionStatus: StateFlow<String> = _connectionStatus
     
     // Album art management
-    private val albumArtManager = AlbumArtManager()
+    val albumArtManager = AlbumArtManager()
     private val mediaStoreAlbumArtManager = MediaStoreAlbumArtManager(context)
     private val albumArtTransferJobs = ConcurrentHashMap<String, Job>()
     private val binaryEncoder = BinaryAlbumArtEncoder()
@@ -113,6 +115,8 @@ class EnhancedBleServerManager(
         val subscriptions: List<String>
     )
     
+    // Removed - now using binary protocol only
+    /*
     data class AlbumArtQuery(
         val type: String = "album_art_query",
         val track_id: String,
@@ -139,6 +143,7 @@ class EnhancedBleServerManager(
         val checksum: String,
         val success: Boolean
     )
+    */
     
     private fun hasPermission(permission: String): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -359,20 +364,50 @@ class EnhancedBleServerManager(
             offset: Int,
             value: ByteArray?
         ) {
-            Log.d(TAG, "Write request from ${device.address} to ${characteristic.uuid}, responseNeeded: $responseNeeded, value size: ${value?.size}")
+            Log.d(TAG, "=== WRITE REQUEST RECEIVED ===")
+            Log.d(TAG, "From: ${device.address}")
+            Log.d(TAG, "Characteristic: ${characteristic.uuid}")
+            Log.d(TAG, "Response needed: $responseNeeded")
+            Log.d(TAG, "Value size: ${value?.size}")
+            if (value != null && value.size > 0) {
+                Log.d(TAG, "First bytes: ${value.take(10).joinToString { "0x%02X".format(it) }}")
+            }
             
             if (characteristic.uuid == BleConstants.COMMAND_RX_CHAR_UUID && value != null) {
+                Log.d(TAG, "Processing command on COMMAND_RX characteristic")
                 try {
+                    // Try to parse as binary protocol first
+                    val parsedMessage = BinaryProtocolV2.parseMessage(value)
+                    Log.d(TAG, "Binary parse result: ${if (parsedMessage != null) "SUCCESS" else "FAILED"}")
+                    if (parsedMessage != null) {
+                        val (header, payload, complete) = parsedMessage
+                        if (complete) {
+                            debugLogger.debug(
+                                "BINARY_COMMAND",
+                                "Binary: ${BinaryProtocolV2.getMessageTypeString(header.messageType)}",
+                                mapOf("type" to "0x${header.messageType.toString(16)}", "size" to payload.size)
+                            )
+                            handleBinaryCommand(device, header, payload)
+                            
+                            // CRITICAL: Send GATT response if needed before returning
+                            if (responseNeeded) {
+                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                            }
+                            return
+                        }
+                    }
+                    
+                    // Fallback to JSON parsing for backward compatibility
                     val jsonStr = String(value, Charsets.UTF_8).trim()
-                    Log.d(TAG, "Received command: $jsonStr")
+                    Log.d(TAG, "Received JSON command (fallback): $jsonStr")
                     
                     debugLogger.debug(
-                        "COMMAND_RECEIVED",
-                        "Raw command data",
+                        "JSON_COMMAND",
+                        "JSON fallback",
                         mapOf("data" to jsonStr, "device" to device.address)
                     )
                     
-                    // Parse command
+                    // Parse command as JSON
                     val command = gson.fromJson(jsonStr, Command::class.java)
                     
                     // Handle special commands
@@ -407,15 +442,7 @@ class EnhancedBleServerManager(
                                     // Note: On Android 8.0+, connection parameters are largely controlled
                                     // by the system based on the active connection's requirements
                                     
-                                    // Send acknowledgment with current connection info
-                                    val ackMsg = mapOf(
-                                        "type" to "connection_priority_response",
-                                        "status" to "acknowledged",
-                                        "mtu" to connectedDevices[device.address]?.mtu,
-                                        "note" to "Connection parameters logged. Android system manages BLE connection intervals."
-                                    )
-                                    val ackData = gson.toJson(ackMsg).toByteArray()
-                                    sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, ackData)
+                                    // Connection parameters logged, no ACK needed with binary protocol
                                     
                                     // Log connection quality
                                     val quality = getConnectionQuality(device.address)
@@ -427,13 +454,6 @@ class EnhancedBleServerManager(
                             } else {
                                 // Pre-Android O
                                 Log.d(TAG, "Connection parameter updates not available on API ${Build.VERSION.SDK_INT}")
-                                val ackMsg = mapOf(
-                                    "type" to "connection_priority_response",
-                                    "status" to "unsupported",
-                                    "api_level" to Build.VERSION.SDK_INT
-                                )
-                                val ackData = gson.toJson(ackMsg).toByteArray()
-                                sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, ackData)
                             }
                         }
                         "album_art_needed", "album_art_query" -> {
@@ -448,9 +468,11 @@ class EnhancedBleServerManager(
                                 mapOf("track_id" to trackId, "checksum" to checksum, "command" to command.command)
                             )
                             
-                            // For album_art_query, the checksum is the artist/album hash
-                            // We need to check if we have album art for this hash
-                            handleAlbumArtQuery(device, trackId, checksum)
+                            // Forward to NocturneServiceBLE with device address
+                            val modifiedCommand = command.copy(
+                                payload = (payload ?: emptyMap()).plus("device_address" to device.address)
+                            )
+                            onCommandReceived(modifiedCommand)
                         }
                         "test_album_art_request" -> {
                             // Test command that requests current track's album art
@@ -475,22 +497,26 @@ class EnhancedBleServerManager(
                             handleTestAlbumArt(device)
                         }
                         "get_capabilities" -> {
-                            // Send capabilities including binary protocol support
-                            val capabilities = mapOf(
-                                "type" to "capabilities",
-                                "binary_protocol" to true,
-                                "binary_protocol_version" to BinaryProtocol.PROTOCOL_VERSION.toInt(),
-                                "max_mtu" to BleConstants.TARGET_MTU,
-                                "album_art_formats" to listOf("webp", "binary"),
-                                "features" to listOf("album_art", "time_sync", "media_control", "binary_transfer")
+                            // Send capabilities using binary protocol v2
+                            val mtu = connectedDevices[device.address]?.mtu ?: 512
+                            val capabilitiesPayload = BinaryProtocolV2.createCapabilitiesPayload(
+                                version = "2.0.0",
+                                features = listOf("album_art", "time_sync", "media_control", "binary_v2", "incremental"),
+                                mtu = mtu,
+                                debugEnabled = false
                             )
-                            val capabilitiesData = gson.toJson(capabilities).toByteArray()
-                            sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, capabilitiesData)
+                            
+                            val message = BinaryProtocolV2.createMessage(
+                                BinaryProtocolV2.MSG_CAPABILITIES,
+                                capabilitiesPayload
+                            )
+                            
+                            sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, message)
                             
                             debugLogger.info(
                                 "CAPABILITIES",
-                                "Sent capabilities with binary protocol support",
-                                mapOf("device" to device.address)
+                                "Sent binary protocol v2 capabilities",
+                                mapOf("device" to device.address, "mtu" to mtu)
                             )
                         }
                         "enable_binary_protocol" -> {
@@ -503,22 +529,19 @@ class EnhancedBleServerManager(
                                 mapOf("device" to device.address)
                             )
                             
-                            // Send acknowledgment
-                            val ack = mapOf(
-                                "type" to "binary_protocol_enabled",
-                                "version" to BinaryProtocol.PROTOCOL_VERSION.toInt()
-                            )
-                            val ackData = gson.toJson(ack).toByteArray()
-                            sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, ackData)
+                            // Binary protocol is already enabled by default, no ACK needed
                         }
                         "request_time_sync" -> {
                             // Handle explicit time sync request
-                            val timeSync = mapOf(
-                                "type" to "timeSync",
-                                "timestamp_ms" to System.currentTimeMillis(),
-                                "timezone" to TimeZone.getDefault().id
+                            // Send time sync in binary format
+                            val timeSyncPayload = BinaryProtocolV2.createTimeSyncPayload(
+                                timestampMs = System.currentTimeMillis(),
+                                timezone = TimeZone.getDefault().id
                             )
-                            val timeSyncData = gson.toJson(timeSync).toByteArray()
+                            val timeSyncData = BinaryProtocolV2.createMessage(
+                                BinaryProtocolV2.MSG_TIME_SYNC,
+                                timeSyncPayload
+                            )
                             
                             // Send with HIGH priority since time sync is important
                             val message = MessageQueue.Message(
@@ -733,31 +756,212 @@ class EnhancedBleServerManager(
         }
     }
     
-    fun sendStateUpdate(state: StateUpdate) {
-        val stateJson = gson.toJson(state)
+    private fun handleBinaryCommand(device: BluetoothDevice, header: BinaryProtocolV2.MessageHeader, payload: ByteArray) {
+        Log.d(TAG, "=== HANDLING BINARY COMMAND ===")
+        Log.d(TAG, "Message Type: 0x${header.messageType.toString(16)} (${BinaryProtocolV2.getMessageTypeString(header.messageType)})")
+        Log.d(TAG, "Message ID: ${header.messageId}")
+        Log.d(TAG, "Payload size: ${payload.size}")
         
-        // Only send if state actually changed (excluding position for comparison)
-        val stateForComparison = state.copy(position_ms = 0)
-        val compareJson = gson.toJson(stateForComparison)
-        
-        if (compareJson != lastSentStateJson) {
-            lastSentStateJson = compareJson
+        when (header.messageType) {
+            BinaryProtocolV2.MSG_CMD_PLAY -> {
+                Log.d(TAG, "Binary command: PLAY - forwarding to command handler")
+                onCommandReceived(Command("play"))
+                Log.d(TAG, "PLAY command forwarded")
+            }
             
-            debugLogger.verbose(
-                "STATE_SENT",
-                "Sending state update",
-                mapOf("state" to stateJson)
-            )
+            BinaryProtocolV2.MSG_CMD_PAUSE -> {
+                Log.d(TAG, "Binary command: PAUSE")
+                onCommandReceived(Command("pause"))
+            }
             
-            // Use HIGH priority for state updates
-            sendNotificationToAll(BleConstants.STATE_TX_CHAR_UUID, stateJson, MessageQueue.Priority.NORMAL)
+            BinaryProtocolV2.MSG_CMD_NEXT -> {
+                Log.d(TAG, "Binary command: NEXT")
+                onCommandReceived(Command("next"))
+            }
             
-            CoroutineScope(Dispatchers.IO).launch {
-                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+            BinaryProtocolV2.MSG_CMD_PREVIOUS -> {
+                Log.d(TAG, "Binary command: PREVIOUS")
+                onCommandReceived(Command("previous"))
+            }
+            
+            BinaryProtocolV2.MSG_CMD_SEEK_TO -> {
+                val (valueMs, _) = BinaryProtocolV2.parseCommandPayload(payload)
+                Log.d(TAG, "Binary command: SEEK_TO $valueMs")
+                onCommandReceived(Command("seek_to", value_ms = valueMs))
+            }
+            
+            BinaryProtocolV2.MSG_CMD_SET_VOLUME -> {
+                val (_, valuePercent) = BinaryProtocolV2.parseCommandPayload(payload)
+                Log.d(TAG, "Binary command: SET_VOLUME $valuePercent")
+                onCommandReceived(Command("set_volume", value_percent = valuePercent))
+            }
+            
+            BinaryProtocolV2.MSG_CMD_REQUEST_STATE -> {
+                Log.d(TAG, "Binary command: REQUEST_STATE")
+                onCommandReceived(Command("request_state"))
+            }
+            
+            BinaryProtocolV2.MSG_CMD_REQUEST_TIMESTAMP -> {
+                Log.d(TAG, "Binary command: REQUEST_TIMESTAMP")
+                onCommandReceived(Command("request_timestamp"))
+            }
+            
+            BinaryProtocolV2.MSG_CMD_ALBUM_ART_QUERY -> {
+                val hash = BinaryProtocolV2.parseAlbumArtQueryPayload(payload)
+                Log.d(TAG, "Binary command: ALBUM_ART_QUERY hash=$hash, device=${device.address}")
+                // Use the hash as a track identifier since we don't have the actual track name here
+                onCommandReceived(Command("album_art_query", payload = mapOf(
+                    "hash" to hash,
+                    "checksum" to hash,  // Use hash as checksum for now
+                    "track_id" to hash,  // Use hash as track_id to avoid empty string
+                    "device_address" to device.address
+                )))
+            }
+            
+            BinaryProtocolV2.MSG_CMD_TEST_ALBUM_ART -> {
+                Log.d(TAG, "Binary command: TEST_ALBUM_ART")
+                onCommandReceived(Command("test_album_art_request"))
+            }
+            
+            BinaryProtocolV2.MSG_PROTOCOL_ENABLE -> {
+                Log.d(TAG, "Binary protocol enable request")
+                // Send capabilities in binary format
+                sendBinaryCapabilities(device)
+            }
+            
+            BinaryProtocolV2.MSG_GET_CAPABILITIES -> {
+                Log.d(TAG, "Binary command: GET_CAPABILITIES")
+                // Send capabilities in binary format
+                sendBinaryCapabilities(device)
+            }
+            
+            BinaryProtocolV2.MSG_ENABLE_BINARY_INCREMENTAL -> {
+                Log.d(TAG, "Binary command: ENABLE_BINARY_INCREMENTAL")
+                // Enable binary incremental updates (already using binary protocol v2)
+                connectedDevices[device.address]?.supportsBinaryProtocol = true
+                Log.d(TAG, "Binary incremental updates enabled for ${device.address}")
+                // No acknowledgment needed - nocturned doesn't expect a response
+            }
+            
+            BinaryProtocolV2.MSG_REQUEST_HIGH_PRIORITY_CONNECTION -> {
+                val reason = if (payload.isNotEmpty()) String(payload, Charsets.UTF_8) else "unknown"
+                Log.d(TAG, "Binary command: REQUEST_HIGH_PRIORITY_CONNECTION reason=$reason")
+                
+                // Log connection parameters request
+                debugLogger.info(
+                    "CONNECTION",
+                    "High priority connection requested (binary)",
+                    mapOf("device" to device.address, "reason" to reason)
+                )
+                
+                // Note: Android system manages BLE connection intervals
+                // We acknowledge the request but actual parameters are system-controlled
+            }
+            
+            BinaryProtocolV2.MSG_OPTIMIZE_CONNECTION_PARAMS -> {
+                // Parse payload: float32 interval + string reason
+                val buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
+                val intervalMs = buffer.getFloat()
+                val reasonLen = buffer.getShort()
+                val reasonBytes = ByteArray(reasonLen.toInt())
+                buffer.get(reasonBytes)
+                val reason = String(reasonBytes, Charsets.UTF_8)
+                
+                Log.d(TAG, "Binary command: OPTIMIZE_CONNECTION_PARAMS interval=$intervalMs, reason=$reason")
+                
+                debugLogger.info(
+                    "CONNECTION",
+                    "Connection optimization notification (binary)",
+                    mapOf("device" to device.address, "interval" to intervalMs.toString(), "reason" to reason)
+                )
+            }
+            
+            else -> {
+                Log.w(TAG, "Unknown binary command type: 0x${header.messageType.toString(16)}")
             }
         }
     }
     
+    private fun sendBinaryCapabilities(device: BluetoothDevice) {
+        val mtu = connectedDevices[device.address]?.mtu ?: 512
+        val capabilities = BinaryProtocolV2.createCapabilitiesPayload(
+            version = "2.0.0",
+            features = listOf("album_art", "time_sync", "media_control", "binary_v2", "incremental"),
+            mtu = mtu,
+            debugEnabled = false
+        )
+        
+        val message = BinaryProtocolV2.createMessage(
+            BinaryProtocolV2.MSG_CAPABILITIES,
+            capabilities
+        )
+        
+        sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, message)
+        Log.d(TAG, "Sent binary capabilities to ${device.address}")
+    }
+    
+    fun sendBinaryMessage(message: ByteArray, priority: MessageQueue.Priority = MessageQueue.Priority.NORMAL) {
+        debugLogger.verbose(
+            "BINARY_MSG_SENT",
+            "Sending binary message",
+            mapOf("size" to message.size)
+        )
+        
+        // Send binary message with specified priority
+        sendNotificationToAll(BleConstants.STATE_TX_CHAR_UUID, message, priority)
+        
+        CoroutineScope(Dispatchers.IO).launch {
+            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+        }
+    }
+    
+    fun sendStateUpdate(state: StateUpdate, forceUpdate: Boolean = false) {
+        Log.d(TAG, "BLE_LOG: sendStateUpdate called - artist: ${state.artist}, track: ${state.track}, playing: ${state.is_playing}, force: $forceUpdate")
+        // Create binary state message
+        val statePayload = BinaryProtocolV2.createFullStatePayload(
+            artist = state.artist ?: "",
+            album = state.album ?: "",
+            track = state.track ?: "",
+            durationMs = state.duration_ms ?: 0L,
+            positionMs = state.position_ms ?: 0L,
+            isPlaying = state.is_playing ?: false,
+            volumePercent = state.volume_percent ?: 50
+        )
+        
+        val binaryMessage = BinaryProtocolV2.createMessage(
+            BinaryProtocolV2.MSG_STATE_FULL,
+            statePayload
+        )
+        Log.d(TAG, "BLE_LOG: Created binary state message type: 0x${BinaryProtocolV2.MSG_STATE_FULL.toString(16)}, size: ${binaryMessage.size}")
+        
+        // Only send if state actually changed (excluding position for comparison) OR if forced
+        val stateForComparison = state.copy(position_ms = 0)
+        val compareJson = gson.toJson(stateForComparison)
+        
+        if (forceUpdate || compareJson != lastSentStateJson) {
+            lastSentStateJson = compareJson
+            
+            Log.d(TAG, "BLE_LOG: State changed, sending update")
+            debugLogger.verbose(
+                "STATE_SENT",
+                "Sending binary state update",
+                mapOf("size" to binaryMessage.size)
+            )
+            
+            // Send binary state with NORMAL priority
+            Log.d(TAG, "BLE_LOG: Sending state update to all devices")
+            sendNotificationToAll(BleConstants.STATE_TX_CHAR_UUID, binaryMessage, MessageQueue.Priority.NORMAL)
+            
+            CoroutineScope(Dispatchers.IO).launch {
+                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+            }
+        } else {
+            Log.d(TAG, "BLE_LOG: State unchanged, not sending update")
+        }
+    }
+    
+    // Removed - using binary protocol only
+    /*
     fun sendStateUpdate(data: Any) {
         Log.d(TAG, "sendStateUpdate called with data type: ${data::class.simpleName}")
         val json = gson.toJson(data)
@@ -785,10 +989,14 @@ class EnhancedBleServerManager(
             _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
         }
     }
+    */
     
     private fun sendNotificationToAll(characteristicUuid: UUID, data: String, priority: MessageQueue.Priority = MessageQueue.Priority.NORMAL) {
         val dataBytes = data.toByteArray(Charsets.UTF_8)
-        
+        sendNotificationToAll(characteristicUuid, dataBytes, priority)
+    }
+    
+    private fun sendNotificationToAll(characteristicUuid: UUID, data: ByteArray, priority: MessageQueue.Priority = MessageQueue.Priority.NORMAL) {
         Log.d(TAG, "sendNotificationToAll: ${connectedDevices.size} connected devices, sending to char: $characteristicUuid")
         
         connectedDevices.values.forEach { context ->
@@ -798,7 +1006,7 @@ class EnhancedBleServerManager(
                 val message = MessageQueue.Message(
                     device = context.device,
                     characteristicUuid = characteristicUuid,
-                    data = dataBytes,
+                    data = data,
                     priority = priority
                 )
                 
@@ -1043,6 +1251,93 @@ class EnhancedBleServerManager(
         // Start transfer immediately
         startAlbumArtTransfer(trackId, checksum)
     }
+    
+    fun sendAlbumArtToDevice(deviceAddress: String, albumArtData: ByteArray, checksum: String, trackId: String) {
+        // Send album art to a specific device
+        val device = connectedDevices[deviceAddress]?.device
+        if (device == null) {
+            Log.w(TAG, "Device $deviceAddress not connected, cannot send album art")
+            return
+        }
+        
+        debugLogger.info(
+            "ALBUM_ART",
+            "Sending album art to specific device",
+            mapOf(
+                "device" to deviceAddress,
+                "track_id" to trackId,
+                "checksum" to checksum,
+                "size" to albumArtData.size.toString()
+            )
+        )
+        
+        // Cache the album art data
+        albumArtManager.getArtFromCache(trackId) ?: run {
+            // Add to cache if not already there
+            try {
+                val cacheField = AlbumArtManager::class.java.getDeclaredField("albumArtCache")
+                cacheField.isAccessible = true
+                val cache = cacheField.get(albumArtManager) as android.util.LruCache<String, AlbumArtManager.CachedAlbumArt>
+                cache.put(trackId, AlbumArtManager.CachedAlbumArt(albumArtData, checksum))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to add to cache", e)
+            }
+        }
+        
+        // Cancel any existing transfer for this device
+        albumArtTransferJobs[deviceAddress]?.cancel()
+        
+        // Start transfer to specific device
+        val job = CoroutineScope(Dispatchers.IO).launch {
+            // Call the private suspend function, not the public one (avoid recursion)
+            try {
+                val deviceContext = connectedDevices[device.address] ?: return@launch
+                // Always use binary protocol
+                sendAlbumArtBinary(device, albumArtData, checksum, trackId, deviceContext)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during album art transfer", e)
+                
+                debugLogger.error(
+                    "ERROR",
+                    "Album art transfer failed: ${e.message}",
+                    mapOf("device" to device.address)
+                )
+                _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+                
+                // Send failure notification in binary
+                try {
+                    val endData = binaryEncoder.encodeAlbumArtEnd(checksum, false)
+                    sendNotificationToDevice(device, BleConstants.ALBUM_ART_TX_CHAR_UUID, endData)
+                } catch (e2: Exception) {
+                    Log.e(TAG, "Failed to send error notification", e2)
+                }
+            }
+        }
+        albumArtTransferJobs[deviceAddress] = job
+    }
+    
+    fun sendNoAlbumArtAvailable(deviceAddress: String, trackId: String, checksum: String, reason: String) {
+        val device = connectedDevices[deviceAddress]?.device
+        if (device == null) {
+            Log.w(TAG, "Device $deviceAddress not connected")
+            return
+        }
+        
+        debugLogger.info(
+            "ALBUM_ART_QUERY",
+            "No album art available",
+            mapOf("device" to deviceAddress, "track_id" to trackId, "reason" to reason)
+        )
+        
+        val noArtMsg = mapOf(
+            "type" to "album_art_not_available",
+            "track_id" to trackId,
+            "checksum" to checksum,
+            "reason" to reason
+        )
+        val msgData = gson.toJson(noArtMsg).toByteArray()
+        sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, msgData)
+    }
 
     fun startAlbumArtTransfer(trackId: String, checksum: String) {
         CoroutineScope(Dispatchers.IO).launch {
@@ -1083,14 +1378,9 @@ class EnhancedBleServerManager(
     ) {
         try {
             val deviceContext = connectedDevices[device.address] ?: return
-            val effectiveMtu = deviceContext.mtu - 3 // Account for BLE overhead
             
-            // Use binary protocol if supported
-            if (deviceContext.supportsBinaryProtocol) {
-                sendAlbumArtBinary(device, albumArtData, checksum, trackId, deviceContext)
-            } else {
-                sendAlbumArtJson(device, albumArtData, checksum, trackId, deviceContext)
-            }
+            // Always use binary protocol
+            sendAlbumArtBinary(device, albumArtData, checksum, trackId, deviceContext)
         } catch (e: Exception) {
             Log.e(TAG, "Error during album art transfer", e)
             
@@ -1101,22 +1391,18 @@ class EnhancedBleServerManager(
             )
             _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
             
-            // Send failure notification
+            // Send failure notification in binary
             try {
-                if (connectedDevices[device.address]?.supportsBinaryProtocol == true) {
-                    val endData = binaryEncoder.encodeAlbumArtEnd(checksum, false)
-                    sendNotificationToDevice(device, BleConstants.ALBUM_ART_TX_CHAR_UUID, endData)
-                } else {
-                    val endMsg = AlbumArtEnd(checksum = checksum, success = false)
-                    val endData = gson.toJson(endMsg).toByteArray()
-                    sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, endData)
-                }
+                val endData = binaryEncoder.encodeAlbumArtEnd(checksum, false)
+                sendNotificationToDevice(device, BleConstants.ALBUM_ART_TX_CHAR_UUID, endData)
             } catch (e2: Exception) {
                 Log.e(TAG, "Failed to send error notification", e2)
             }
         }
     }
     
+    // Removed - now using binary protocol only
+    /*
     private suspend fun sendAlbumArtJson(
         device: BluetoothDevice,
         albumArtData: ByteArray,
@@ -1273,6 +1559,7 @@ class EnhancedBleServerManager(
             )
             _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return)
     }
+    */
     
     private suspend fun sendAlbumArtBinary(
         device: BluetoothDevice,
@@ -1320,10 +1607,22 @@ class EnhancedBleServerManager(
         val chunksSent = java.util.concurrent.atomic.AtomicInteger(0)
         val sendCompleteLatch = java.util.concurrent.CountDownLatch(chunksToSend)
         
-        // Send chunks
+        // Send chunks with proper pacing to avoid overflowing BLE buffers
         binaryTransfer.chunkMessages.forEachIndexed { index, chunkData ->
             val currentJob = albumArtTransferJobs[device.address]
             if (currentJob == null || !currentJob.isActive) return@forEachIndexed
+            
+            // Add delay between chunks to prevent buffer overflow
+            // Adjust delay based on chunk size - larger chunks need more time
+            val delayMs = when {
+                binaryTransfer.chunkSize > 400 -> 100L  // Large chunks need more spacing
+                binaryTransfer.chunkSize > 200 -> 75L   // Medium chunks
+                else -> 50L                             // Small chunks (still need good spacing)
+            }
+            
+            if (index > 0) {
+                delay(delayMs)
+            }
             
             val chunkMessage = MessageQueue.Message(
                 device = device,
@@ -1333,9 +1632,8 @@ class EnhancedBleServerManager(
                 callback = { success ->
                     if (success) {
                         val sent = chunksSent.incrementAndGet()
-                        if (sent % 10 == 0 || sent == chunksToSend) {
-                            Log.d(TAG, "Binary album art chunk sent: $sent/$chunksToSend")
-                        }
+                        // Log every chunk for debugging
+                        Log.d(TAG, "Binary album art chunk sent: $sent/$chunksToSend (index: $index)")
                     }
                     sendCompleteLatch.countDown()
                 },
@@ -2059,6 +2357,8 @@ class EnhancedBleServerManager(
         return hash.joinToString("") { "%02x".format(it) }
     }
     
+    // Removed - using binary protocol only
+    /*
     fun sendResponse(response: String) {
         // Send response to all connected devices via ResponseTx characteristic
         connectedDevices.values.forEach { deviceContext ->
@@ -2071,6 +2371,7 @@ class EnhancedBleServerManager(
             messageQueue.enqueue(message)
         }
     }
+    */
     
     fun sendIncrementalUpdate(messageType: Short, value: Any) {
         // Create binary payload based on value type

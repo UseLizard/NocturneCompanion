@@ -21,6 +21,7 @@ import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.gson.Gson
 import com.paulcity.nocturnecompanion.ble.BinaryProtocol
+import com.paulcity.nocturnecompanion.ble.BinaryProtocolV2
 import com.paulcity.nocturnecompanion.data.Command
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import com.paulcity.nocturnecompanion.data.AudioEvent
@@ -80,6 +81,17 @@ class NocturneServiceBLE : Service() {
     private var lastTrackId: String? = null
     private var audioPlaybackCallback: AudioManager.AudioPlaybackCallback? = null
     private var isAudioActuallyPlaying = false
+    
+    // Track pending album art requests (device address -> request info)
+    data class PendingAlbumArtRequest(
+        val deviceAddress: String,
+        val trackId: String,
+        val checksum: String,
+        val timestamp: Long,
+        val retryCount: Int = 0,
+        val nextRetryTime: Long = 0
+    )
+    private val pendingAlbumArtRequests = mutableMapOf<String, PendingAlbumArtRequest>()
     
     // Audio events tracking
     private val audioEvents = mutableListOf<AudioEvent>()
@@ -143,6 +155,9 @@ class NocturneServiceBLE : Service() {
                 lastTrackId = newTrackId
                 Log.d(TAG, "Track changed to: $newTrackId")
                 // Album art will be sent only when nocturned requests it via album_art_query
+                
+                // Check if we can fulfill any pending album art requests with the new metadata
+                checkPendingAlbumArtRequests()
                 
                 // Track metadata change event
                 trackAudioEvent(
@@ -302,8 +317,10 @@ class NocturneServiceBLE : Service() {
                     initializeBleServer()
                     observeMediaControllers()
                     observeServerStatus()
+                    observeDeviceConnections()
                     observeDebugLogs()
                     observeConnectedDevices()
+                    startPeriodicCleanup()
                     
                     // Setup audio playback monitoring
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -352,7 +369,12 @@ class NocturneServiceBLE : Service() {
         }
 
         // Command handler
-        val commandHandler = { command: Command ->
+        val commandHandler: (Command) -> Unit = { command ->
+            Log.d(TAG, "=== COMMAND HANDLER INVOKED ===")
+            Log.d(TAG, "Command: ${command.command}")
+            Log.d(TAG, "Value MS: ${command.value_ms}")
+            Log.d(TAG, "Value Percent: ${command.value_percent}")
+            
             if (debugMode) {
                 showDataReceivedNotification(gson.toJson(command))
             }
@@ -361,8 +383,10 @@ class NocturneServiceBLE : Service() {
             val intent = Intent(ACTION_COMMAND_RECEIVED)
             intent.putExtra(EXTRA_JSON_DATA, gson.toJson(command))
             sendBroadcastCompat(intent)
+            Log.d(TAG, "Command broadcast sent")
             
             handleCommand(command)
+            Log.d(TAG, "Command handling completed")
         }
 
         // Initialize BLE server
@@ -413,15 +437,8 @@ class NocturneServiceBLE : Service() {
         // Handle commands that don't require a media controller
         when (command.command) {
             "get_capabilities" -> {
-                // Respond with capabilities including binary incremental updates
-                Log.d(TAG, "Capabilities requested - sending response")
-                val capabilities = mapOf(
-                    "binary_protocol" to true,
-                    "incremental_updates" to true,
-                    "album_art" to true,
-                    "version" to "2.0.0"
-                )
-                bleServerManager.sendResponse(gson.toJson(capabilities))
+                // Handled by binary protocol in EnhancedBleServerManager
+                Log.d(TAG, "Capabilities requested - handled by binary protocol")
                 return
             }
             "enable_binary_incremental" -> {
@@ -429,7 +446,18 @@ class NocturneServiceBLE : Service() {
                 Log.d(TAG, "Enabling binary incremental updates")
                 useBinaryIncrementalUpdates = true
                 previousBinaryState = null // Reset to force initial full update
-                bleServerManager.sendResponse(gson.toJson(mapOf("binary_incremental_enabled" to true)))
+                // Response handled by binary protocol in EnhancedBleServerManager
+                return
+            }
+            "request_state" -> {
+                Log.d(TAG, "Received request_state command")
+                sendStateUpdate(forceUpdate = true)
+                return
+            }
+            "request_timestamp" -> {
+                Log.d(TAG, "Received request_timestamp command")
+                sendTimeSync()
+                // Position included in binary time sync message
                 return
             }
             "request_track_refresh" -> {
@@ -450,6 +478,28 @@ class NocturneServiceBLE : Service() {
                 Log.d(TAG, "State update triggered for track refresh")
                 
                 Log.d(TAG, "Exiting request_track_refresh handler")
+                return
+            }
+            "album_art_query" -> {
+                // Handle album art request from nocturned
+                val payload = command.payload
+                val trackId = payload?.get("track_id") as? String ?: ""
+                val checksum = payload?.get("checksum") as? String ?: ""
+                val hash = payload?.get("hash") as? String ?: ""
+                
+                Log.d(TAG, "BLE_LOG: Album art query received - track_id: $trackId, checksum: $checksum, hash: $hash")
+                Log.d(TAG, "BLE_LOG: Full payload: $payload")
+                
+                // Get device address from command context (passed via BLE server)
+                val deviceAddress = payload?.get("device_address") as? String
+                if (deviceAddress != null) {
+                    Log.d(TAG, "BLE_LOG: Calling handleAlbumArtQuery for device: $deviceAddress")
+                    // Use hash as checksum if checksum is empty
+                    val finalChecksum = if (checksum.isNotEmpty()) checksum else hash
+                    handleAlbumArtQuery(deviceAddress, trackId, finalChecksum)
+                } else {
+                    Log.e(TAG, "BLE_LOG: No device address in album art query")
+                }
                 return
             }
         }
@@ -633,6 +683,30 @@ class NocturneServiceBLE : Service() {
             }
         }
     }
+    
+    private fun observeDeviceConnections() {
+        serviceScope.launch {
+            bleServerManager.connectedDevicesList.collect { devices ->
+                // Clean up pending requests for disconnected devices
+                val connectedAddresses = devices.map { it.address }.toSet()
+                val disconnectedAddresses = pendingAlbumArtRequests.keys.filter { it !in connectedAddresses }
+                
+                disconnectedAddresses.forEach { address ->
+                    Log.d(TAG, "Removing pending album art request for disconnected device: $address")
+                    pendingAlbumArtRequests.remove(address)
+                }
+            }
+        }
+    }
+    
+    private fun startPeriodicCleanup() {
+        serviceScope.launch {
+            while (isActive) {
+                delay(10000) // Run every 10 seconds
+                cleanupPendingRequests()
+            }
+        }
+    }
 
     private fun observeDebugLogs() {
         serviceScope.launch {
@@ -737,7 +811,7 @@ class NocturneServiceBLE : Service() {
         // If from audio event, send immediately without debounce
         if (fromAudioEvent) {
             serviceScope.launch {
-                performStateUpdate()
+                performStateUpdate(forceUpdate)
             }
             return
         }
@@ -750,7 +824,7 @@ class NocturneServiceBLE : Service() {
                     Log.d(TAG, "Skipping redundant state update")
                     return@launch
                 }
-                performStateUpdate()
+                performStateUpdate(forceUpdate)
             }
         }
         
@@ -758,16 +832,16 @@ class NocturneServiceBLE : Service() {
         stateUpdateHandler.postDelayed(stateUpdateRunnable!!, STATE_UPDATE_DEBOUNCE_MS)
     }
     
-    private suspend fun performStateUpdate() {
+    private suspend fun performStateUpdate(forceUpdate: Boolean = false) {
         try {
             val now = System.currentTimeMillis()
             
             // Check if we should use incremental binary updates
-            if (useBinaryIncrementalUpdates && previousBinaryState != null) {
+            if (useBinaryIncrementalUpdates && previousBinaryState != null && !forceUpdate) {
                 sendIncrementalBinaryUpdates()
             } else {
                 // Send full state update via BLE
-                bleServerManager.sendStateUpdate(lastState)
+                bleServerManager.sendStateUpdate(lastState, forceUpdate)
             }
             
             // Broadcast locally
@@ -889,15 +963,20 @@ class NocturneServiceBLE : Service() {
     private fun sendTimeSync() {
         serviceScope.launch {
             try {
-                val timeSync = mapOf(
-                    "type" to "timeSync",
-                    "timestamp_ms" to System.currentTimeMillis(),
-                    "timezone" to TimeZone.getDefault().id
+                // Create binary time sync message
+                val timeSyncPayload = BinaryProtocolV2.createTimeSyncPayload(
+                    timestampMs = System.currentTimeMillis(),
+                    timezone = TimeZone.getDefault().id
+                )
+                val timeSyncData = BinaryProtocolV2.createMessage(
+                    BinaryProtocolV2.MSG_TIME_SYNC,
+                    timeSyncPayload
                 )
                 
-                bleServerManager.sendStateUpdate(timeSync)
+                // Send with HIGH priority
+                bleServerManager.sendBinaryMessage(timeSyncData, com.paulcity.nocturnecompanion.ble.MessageQueue.Priority.HIGH)
                 
-                Log.d(TAG, "Time sync sent: ${System.currentTimeMillis()} - ${TimeZone.getDefault().id}")
+                Log.d(TAG, "Time sync sent (binary): ${System.currentTimeMillis()} - ${TimeZone.getDefault().id}")
                 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send time sync", e)
@@ -1110,6 +1189,202 @@ class NocturneServiceBLE : Service() {
             .build()
     }
 
+    private fun handleAlbumArtQuery(deviceAddress: String, trackId: String, requestedChecksum: String) {
+        Log.d(TAG, "BLE_LOG: Processing album art query from $deviceAddress for checksum: $requestedChecksum")
+        
+        // Try to send album art immediately if available
+        val metadata = currentMediaController?.metadata
+        if (metadata != null) {
+            val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
+            val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+            val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
+            
+            Log.d(TAG, "BLE_LOG: Current media: artist=$artist, album=$album, title=$title")
+            
+            // Generate MD5 hash for current media
+            val currentHash = bleServerManager.albumArtManager.generateMetadataHash(artist, album)
+            
+            Log.d(TAG, "BLE_LOG: Comparing hashes - requested: $requestedChecksum, current: $currentHash")
+            
+            // Check if this matches the requested track
+            if (currentHash == requestedChecksum || requestedChecksum.isEmpty() || requestedChecksum == "current") {
+                Log.d(TAG, "BLE_LOG: Hash matches or is current, attempting to extract album art")
+                // Try to extract and send album art
+                val albumArtResult = bleServerManager.albumArtManager.extractAlbumArt(metadata)
+                if (albumArtResult != null) {
+                    val (artData, sha256Checksum) = albumArtResult
+                    Log.d(TAG, "BLE_LOG: Album art extracted successfully: ${artData.size} bytes, SHA256: $sha256Checksum")
+                    
+                    // Send the album art
+                    bleServerManager.sendAlbumArtToDevice(deviceAddress, artData, sha256Checksum, trackId)
+                    
+                    // Remove from pending if it was there
+                    pendingAlbumArtRequests.remove(deviceAddress)
+                } else {
+                    // Album art not available yet, add to pending requests
+                    Log.d(TAG, "Album art not available yet, adding to pending requests")
+                    val request = PendingAlbumArtRequest(
+                        deviceAddress = deviceAddress,
+                        trackId = trackId,
+                        checksum = requestedChecksum,
+                        timestamp = System.currentTimeMillis(),
+                        retryCount = 0,
+                        nextRetryTime = System.currentTimeMillis() + 100 // First retry in 100ms
+                    )
+                    pendingAlbumArtRequests[deviceAddress] = request
+                    
+                    // Schedule first retry
+                    scheduleAlbumArtRetry(request)
+                }
+            } else {
+                // Different track, send not available
+                Log.d(TAG, "Hash mismatch - requested track is not current")
+                bleServerManager.sendNoAlbumArtAvailable(deviceAddress, trackId, requestedChecksum, "Track mismatch")
+            }
+        } else {
+            // No media playing
+            Log.d(TAG, "No media controller available")
+            bleServerManager.sendNoAlbumArtAvailable(deviceAddress, trackId, requestedChecksum, "No media playing")
+        }
+    }
+    
+    private fun scheduleAlbumArtRetry(request: PendingAlbumArtRequest) {
+        val delays = listOf(100L, 500L, 1000L, 2000L) // Exponential backoff
+        if (request.retryCount < delays.size) {
+            val delay = delays[request.retryCount]
+            Log.d(TAG, "Scheduling album art retry #${request.retryCount + 1} in ${delay}ms for ${request.deviceAddress}")
+            
+            serviceScope.launch {
+                delay(delay)
+                retryAlbumArtRequest(request)
+            }
+        } else {
+            // Max retries reached, remove from pending
+            Log.d(TAG, "Max retries reached for album art request from ${request.deviceAddress}")
+            pendingAlbumArtRequests.remove(request.deviceAddress)
+            bleServerManager.sendNoAlbumArtAvailable(
+                request.deviceAddress, 
+                request.trackId, 
+                request.checksum, 
+                "Album art not available after retries"
+            )
+        }
+    }
+    
+    private fun retryAlbumArtRequest(request: PendingAlbumArtRequest) {
+        // Check if request is still pending
+        val currentRequest = pendingAlbumArtRequests[request.deviceAddress]
+        if (currentRequest == null || currentRequest.timestamp != request.timestamp) {
+            Log.d(TAG, "Album art request no longer pending or replaced")
+            return
+        }
+        
+        // Check if album art is now available
+        val metadata = currentMediaController?.metadata
+        if (metadata != null) {
+            val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
+            val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+            val currentHash = bleServerManager.albumArtManager.generateMetadataHash(artist, album)
+            
+            if (currentHash == request.checksum || request.checksum.isEmpty() || request.checksum == "current") {
+                val albumArtResult = bleServerManager.albumArtManager.extractAlbumArt(metadata)
+                if (albumArtResult != null) {
+                    val (artData, sha256Checksum) = albumArtResult
+                    Log.d(TAG, "Album art now available on retry #${request.retryCount + 1}, sending to ${request.deviceAddress}")
+                    
+                    // Send the album art
+                    bleServerManager.sendAlbumArtToDevice(request.deviceAddress, artData, sha256Checksum, request.trackId)
+                    
+                    // Remove from pending
+                    pendingAlbumArtRequests.remove(request.deviceAddress)
+                } else {
+                    // Still not available, schedule next retry
+                    val updatedRequest = request.copy(
+                        retryCount = request.retryCount + 1,
+                        nextRetryTime = System.currentTimeMillis() + (500L * (request.retryCount + 1))
+                    )
+                    pendingAlbumArtRequests[request.deviceAddress] = updatedRequest
+                    scheduleAlbumArtRetry(updatedRequest)
+                }
+            } else {
+                // Track changed, cancel pending request
+                Log.d(TAG, "Track changed, cancelling pending album art request")
+                pendingAlbumArtRequests.remove(request.deviceAddress)
+                bleServerManager.sendNoAlbumArtAvailable(
+                    request.deviceAddress,
+                    request.trackId,
+                    request.checksum,
+                    "Track changed"
+                )
+            }
+        } else {
+            // No media controller, cancel request
+            Log.d(TAG, "No media controller, cancelling pending album art request")
+            pendingAlbumArtRequests.remove(request.deviceAddress)
+            bleServerManager.sendNoAlbumArtAvailable(
+                request.deviceAddress,
+                request.trackId,
+                request.checksum,
+                "No media playing"
+            )
+        }
+    }
+    
+    private fun checkPendingAlbumArtRequests() {
+        // Called when metadata changes to check if we can fulfill any pending requests
+        if (pendingAlbumArtRequests.isEmpty()) return
+        
+        val metadata = currentMediaController?.metadata ?: return
+        val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
+        val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+        val currentHash = bleServerManager.albumArtManager.generateMetadataHash(artist, album)
+        
+        // Check each pending request
+        val requestsToRemove = mutableListOf<String>()
+        for ((deviceAddress, request) in pendingAlbumArtRequests) {
+            if (currentHash == request.checksum || request.checksum.isEmpty() || request.checksum == "current") {
+                // This request matches current media
+                val albumArtResult = bleServerManager.albumArtManager.extractAlbumArt(metadata)
+                if (albumArtResult != null) {
+                    val (artData, sha256Checksum) = albumArtResult
+                    Log.d(TAG, "Proactively sending album art to $deviceAddress after metadata change")
+                    
+                    // Send the album art
+                    bleServerManager.sendAlbumArtToDevice(deviceAddress, artData, sha256Checksum, request.trackId)
+                    requestsToRemove.add(deviceAddress)
+                }
+            } else {
+                // This request no longer matches, remove it
+                Log.d(TAG, "Removing stale album art request for $deviceAddress (track changed)")
+                bleServerManager.sendNoAlbumArtAvailable(
+                    deviceAddress,
+                    request.trackId,
+                    request.checksum,
+                    "Track changed"
+                )
+                requestsToRemove.add(deviceAddress)
+            }
+        }
+        
+        // Remove fulfilled or stale requests
+        requestsToRemove.forEach { pendingAlbumArtRequests.remove(it) }
+    }
+    
+    private fun cleanupPendingRequests() {
+        // Remove old pending requests (older than 5 seconds)
+        val now = System.currentTimeMillis()
+        val timeout = 5000L // 5 seconds
+        
+        val requestsToRemove = pendingAlbumArtRequests.filter { (_, request) ->
+            now - request.timestamp > timeout
+        }.keys
+        
+        requestsToRemove.forEach { deviceAddress ->
+            Log.d(TAG, "Removing timed out album art request for $deviceAddress")
+            pendingAlbumArtRequests.remove(deviceAddress)
+        }
+    }
+
     private fun updateNotification(message: String) {
         val notification = createNotification(message)
         val notificationManager = getSystemService(NotificationManager::class.java)
@@ -1175,6 +1450,33 @@ class NocturneServiceBLE : Service() {
                         pollingRetryCount = 0
                     }
                     val controller = currentMediaController!!
+                    
+                    // Check for metadata changes first
+                    controller.metadata?.let { metadata ->
+                        val currentArtist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
+                        val currentAlbum = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM)
+                        val currentTrack = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
+                        val currentDuration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
+                        
+                        // Check if metadata changed
+                        if (currentArtist != lastState.artist || 
+                            currentAlbum != lastState.album || 
+                            currentTrack != lastState.track ||
+                            currentDuration != lastState.duration_ms) {
+                            
+                            Log.d(TAG, "Polling detected metadata change - Track: $currentTrack")
+                            
+                            // Update metadata
+                            lastState.artist = currentArtist
+                            lastState.album = currentAlbum
+                            lastState.track = currentTrack
+                            lastState.duration_ms = currentDuration
+                            
+                            // Send state update immediately for track change
+                            sendStateUpdate(forceUpdate = true)
+                        }
+                    }
+                    
                     // Manually check and update state
                     controller.playbackState?.let { state ->
                         val isPlaying = state.state == PlaybackState.STATE_PLAYING
