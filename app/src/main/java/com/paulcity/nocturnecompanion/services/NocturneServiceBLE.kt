@@ -614,6 +614,16 @@ class NocturneServiceBLE : Service() {
                         // Handle request to switch to 2M PHY for better throughput
                         handle2MPhyRequest(command)
                     }
+                    "test_album_art_request", "test_album_art" -> {
+                        // Handle test album art request - send current track's album art
+                        Log.d(TAG, "Test album art request received")
+                        handleTestAlbumArtRequest(command)
+                    }
+                    "album_art_query", "album_art_needed" -> {
+                        // Handle album art query with hash validation
+                        Log.d(TAG, "Album art query received")
+                        handleAlbumArtQuery(command)
+                    }
                     else -> {
                         Log.w(TAG, "Unknown command: ${command.command}")
                     }
@@ -1788,6 +1798,31 @@ class NocturneServiceBLE : Service() {
                 Log.d(TAG, "BLE_LOG: Throughput test completed")
             }
         }
+    }
+    
+    private fun handleTestAlbumArtRequest(command: Command) {
+        Log.d(TAG, "BLE_LOG: Test album art request received")
+        
+        // Get device address from command payload if available
+        val deviceAddress = (command.payload?.get("device_address") as? String) ?: run {
+            // If no device address, send to first connected device
+            bleServerManager.connectedDevicesList.value.firstOrNull()?.address ?: run {
+                Log.w(TAG, "BLE_LOG: No connected devices for test album art")
+                return
+            }
+        }
+        
+        // For test request, use empty checksum to send current track's art
+        handleAlbumArtQuery(deviceAddress, "test_track", "current")
+    }
+    
+    private fun handleAlbumArtQuery(command: Command) {
+        val payload = command.payload ?: return
+        val deviceAddress = payload["device_address"] as? String ?: return
+        val trackId = payload["track_id"] as? String ?: ""
+        val checksum = payload["checksum"] as? String ?: ""
+        
+        handleAlbumArtQuery(deviceAddress, trackId, checksum)
     }
     
     private fun handle2MPhyRequest(command: Command) {

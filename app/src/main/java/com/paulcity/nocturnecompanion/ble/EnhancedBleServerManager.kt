@@ -534,8 +534,11 @@ class EnhancedBleServerManager(
                                 mapOf("device" to device.address)
                             )
                             
-                            // Handle test album art request for current track
-                            handleTestAlbumArtRequest(device)
+                            // Forward to NocturneServiceBLE with device address
+                            val modifiedCommand = command.copy(
+                                payload = mapOf("device_address" to device.address)
+                            )
+                            onCommandReceived(modifiedCommand)
                         }
                         "test_album_art" -> {
                             // Test command for album art transfer with custom settings
@@ -545,8 +548,11 @@ class EnhancedBleServerManager(
                                 mapOf("device" to device.address)
                             )
                             
-                            // Send a test album art image
-                            handleTestAlbumArt(device)
+                            // Forward to NocturneServiceBLE with device address
+                            val modifiedCommand = command.copy(
+                                payload = mapOf("device_address" to device.address)
+                            )
+                            onCommandReceived(modifiedCommand)
                         }
                         "get_capabilities" -> {
                             // Send capabilities using binary protocol v2
