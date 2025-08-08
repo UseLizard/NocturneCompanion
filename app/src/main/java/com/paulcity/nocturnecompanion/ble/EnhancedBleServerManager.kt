@@ -1221,7 +1221,7 @@ class EnhancedBleServerManager(
         return sendNotificationToDeviceInternal(device, characteristicUuid, data)
     }
     
-    private fun sendNotificationToDevice(device: BluetoothDevice, characteristicUuid: UUID, data: ByteArray) {
+    fun sendNotificationToDevice(device: BluetoothDevice, characteristicUuid: UUID, data: ByteArray) {
         // Queue the message instead of sending directly
         val priority = when (characteristicUuid) {
             BleConstants.ALBUM_ART_TX_CHAR_UUID -> MessageQueue.Priority.BULK

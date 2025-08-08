@@ -16,7 +16,9 @@ import android.media.session.MediaController
 import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
+import android.util.Base64
 import android.util.Log
+import android.bluetooth.BluetoothAdapter
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.gson.Gson
@@ -1812,8 +1814,93 @@ class NocturneServiceBLE : Service() {
             }
         }
         
-        // For test request, use empty checksum to send current track's art
-        handleAlbumArtQuery(deviceAddress, "test_track", "current")
+        // Send test album art using test-specific message types
+        sendTestAlbumArt(deviceAddress)
+    }
+    
+    private fun sendTestAlbumArt(deviceAddress: String) {
+        Log.d(TAG, "BLE_LOG: Sending test album art to $deviceAddress")
+        
+        // Try to get current album art
+        val metadata = currentMediaController?.metadata
+        if (metadata == null) {
+            Log.w(TAG, "BLE_LOG: No media metadata available for test album art")
+            return
+        }
+        
+        val albumArtResult = bleServerManager.albumArtManager.extractAlbumArt(metadata)
+        if (albumArtResult == null) {
+            Log.w(TAG, "BLE_LOG: No album art available for test")
+            return
+        }
+        
+        val (artData, sha256Checksum) = albumArtResult
+        Log.d(TAG, "BLE_LOG: Test album art extracted: ${artData.size} bytes, SHA256: $sha256Checksum")
+        
+        // Calculate chunk size based on MTU
+        val deviceInfo = bleServerManager.connectedDevicesList.value.find { it.address == deviceAddress }
+        val mtu = deviceInfo?.mtu ?: 512
+        val effectiveMtu = mtu - 3 // BLE overhead
+        val jsonOverhead = 174 // Typical JSON overhead for chunks
+        val chunkSize = maxOf(50, minOf(400, effectiveMtu - jsonOverhead))
+        
+        val totalChunks = (artData.size + chunkSize - 1) / chunkSize
+        
+        // Get the device object
+        val bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
+        val device = bluetoothAdapter?.getRemoteDevice(deviceAddress)
+        if (device == null) {
+            Log.e(TAG, "BLE_LOG: Device not found: $deviceAddress")
+            return
+        }
+        
+        // Send test_album_art_start
+        val startMessage = mapOf(
+            "type" to "test_album_art_start",
+            "size" to artData.size,
+            "checksum" to sha256Checksum,
+            "total_chunks" to totalChunks
+        )
+        val startJson = gson.toJson(startMessage)
+        bleServerManager.sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, startJson.toByteArray())
+        
+        // Send chunks
+        serviceScope.launch(Dispatchers.IO) {
+            for (i in 0 until totalChunks) {
+                val start = i * chunkSize
+                val end = minOf(start + chunkSize, artData.size)
+                val chunkData = artData.sliceArray(start until end)
+                val encodedChunk = Base64.encodeToString(chunkData, Base64.NO_WRAP)
+                
+                val chunkMessage = mapOf(
+                    "type" to "test_album_art_chunk",
+                    "checksum" to sha256Checksum,
+                    "chunk_index" to i,
+                    "data" to encodedChunk
+                )
+                
+                val chunkJson = gson.toJson(chunkMessage)
+                bleServerManager.sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, chunkJson.toByteArray())
+                
+                // Small delay between chunks to avoid overwhelming
+                delay(5)
+                
+                if (i % 10 == 0) {
+                    Log.d(TAG, "BLE_LOG: Test album art progress: ${i + 1}/$totalChunks chunks")
+                }
+            }
+            
+            // Send test_album_art_end
+            val endMessage = mapOf(
+                "type" to "test_album_art_end",
+                "checksum" to sha256Checksum,
+                "success" to true
+            )
+            val endJson = gson.toJson(endMessage)
+            bleServerManager.sendNotificationToDevice(device, BleConstants.STATE_TX_CHAR_UUID, endJson.toByteArray())
+            
+            Log.d(TAG, "BLE_LOG: Test album art transfer complete")
+        }
     }
     
     private fun handleAlbumArtQuery(command: Command) {
