@@ -427,6 +427,30 @@ class EnhancedBleServerManager(
                     
                     // Fallback to JSON parsing for backward compatibility
                     val jsonStr = String(value, Charsets.UTF_8).trim()
+                    
+                    // Check if this looks like JSON (starts with { or [) before parsing
+                    if (!jsonStr.startsWith("{") && !jsonStr.startsWith("[")) {
+                        // This is raw binary data (e.g., throughput test data)
+                        Log.d(TAG, "Received raw binary data: ${value.size} bytes")
+                        debugLogger.debug(
+                            "BINARY_DATA",
+                            "Raw data received (throughput test?)",
+                            mapOf("size" to value.size.toString(), "device" to device.address)
+                        )
+                        
+                        // For throughput test, just acknowledge receipt
+                        // The data itself is just test data and doesn't need processing
+                        CoroutineScope(Dispatchers.IO).launch {
+                            _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
+                        }
+                        
+                        // Send response if needed and return early
+                        if (responseNeeded) {
+                            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                        }
+                        return
+                    }
+                    
                     Log.d(TAG, "Received JSON command (fallback): $jsonStr")
                     
                     debugLogger.debug(
