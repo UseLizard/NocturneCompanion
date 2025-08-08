@@ -54,6 +54,7 @@ class MainActivity : ComponentActivity() {
 
    private lateinit var bluetoothAdapter: BluetoothAdapter
    private val discoveredDevices = mutableStateListOf<BluetoothDevice>()
+   private val connectedDevices = mutableStateListOf<com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager.DeviceInfo>()
    private var isReceiverRegistered = false
 
    private val scanPermissionsLauncher =
@@ -81,6 +82,7 @@ class MainActivity : ComponentActivity() {
    private val serverStatus = mutableStateOf("Disconnected")
    private val isServerRunning = mutableStateOf(false)
    private val notifications = mutableStateOf(listOf<String>())
+   private var bleServerManager: com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager? = null
 
    private val receiver = object : BroadcastReceiver() {
        override fun onReceive(context: Context?, intent: Intent?) {
@@ -119,6 +121,18 @@ class MainActivity : ComponentActivity() {
                        notifications.value = currentList
                    }
                }
+               NocturneServiceBLE.ACTION_CONNECTED_DEVICES -> {
+                   val devicesJson = intent.getStringExtra(NocturneServiceBLE.EXTRA_CONNECTED_DEVICES) ?: "[]"
+                   Log.d("MainActivity", "Connected devices broadcast received: $devicesJson")
+                   try {
+                       val gson = com.google.gson.Gson()
+                       val devices = gson.fromJson(devicesJson, Array<com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager.DeviceInfo>::class.java)
+                       connectedDevices.clear()
+                       connectedDevices.addAll(devices)
+                   } catch (e: Exception) {
+                       Log.e("MainActivity", "Failed to parse connected devices", e)
+                   }
+               }
                else -> {
                    Log.w("MainActivity", "Unknown broadcast action received: ${intent?.action}")
                }
@@ -146,6 +160,7 @@ class MainActivity : ComponentActivity() {
                addAction(NocturneServiceBLE.ACTION_STATE_UPDATED)
                addAction(NocturneServiceBLE.ACTION_SERVER_STATUS)
                addAction(NocturneServiceBLE.ACTION_NOTIFICATION)
+               addAction(NocturneServiceBLE.ACTION_CONNECTED_DEVICES)
            }
            
            // Use LocalBroadcastManager for more reliable delivery on Android 14+
@@ -171,9 +186,11 @@ class MainActivity : ComponentActivity() {
            NocturneCompanionTheme {
                MainScreen(
                    devices = discoveredDevices,
+                   connectedDevices = connectedDevices,
                    onStartScan = { checkPermissionsAndScan() },
                    onStartServer = { requestBluetoothConnectPermission() },
                    onStopServer = { stopNocturneService() },
+                   onRequestPhyUpdate = { deviceAddress -> requestPhyUpdateForDevice(deviceAddress) },
                    serverStatus = serverStatus.value,
                    isServerRunning = isServerRunning.value,
                    notifications = notifications.value,
@@ -318,15 +335,28 @@ class MainActivity : ComponentActivity() {
        Log.d("MainActivity", "Album art upload not supported in BLE version")
        // Album art upload removed in BLE-only implementation
    }
+   
+   private fun requestPhyUpdateForDevice(deviceAddress: String) {
+       Log.d("MainActivity", "Requesting PHY update for device: $deviceAddress")
+       
+       // Send intent to service to request PHY update
+       val intent = Intent(this, NocturneServiceBLE::class.java).apply {
+           action = "com.paulcity.nocturnecompanion.REQUEST_PHY_UPDATE"
+           putExtra("device_address", deviceAddress)
+       }
+       startService(intent)
+   }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
    devices: List<BluetoothDevice>,
+   connectedDevices: List<com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager.DeviceInfo>,
    onStartScan: () -> Unit,
    onStartServer: () -> Unit,
    onStopServer: () -> Unit,
+   onRequestPhyUpdate: (String) -> Unit,
    serverStatus: String,
    isServerRunning: Boolean,
    notifications: List<String>,
@@ -380,7 +410,7 @@ fun MainScreen(
                onUploadAlbumArt = onUploadAlbumArt
            )
            1 -> DebugTab(lastCommandJson, lastStateUpdateJson)
-           2 -> DevicesTab(devices, onStartScan)
+           2 -> DevicesTab(devices, connectedDevices, onStartScan, onRequestPhyUpdate)
        }
    }
 }
@@ -434,19 +464,59 @@ fun MainTab(
 }
 
 @Composable
-fun DevicesTab(devices: List<BluetoothDevice>, onStartScan: () -> Unit) {
+fun DevicesTab(
+   devices: List<BluetoothDevice>,
+   connectedDevices: List<com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager.DeviceInfo>,
+   onStartScan: () -> Unit,
+   onRequestPhyUpdate: (String) -> Unit
+) {
    Column(
        modifier = Modifier
            .fillMaxSize()
            .padding(16.dp),
        horizontalAlignment = Alignment.CenterHorizontally
    ) {
+       // Connected devices section
+       if (connectedDevices.isNotEmpty()) {
+           Text(
+               "Connected Devices",
+               style = MaterialTheme.typography.titleMedium,
+               modifier = Modifier.padding(bottom = 8.dp)
+           )
+           
+           LazyColumn(
+               modifier = Modifier
+                   .fillMaxWidth()
+                   .weight(1f)
+           ) {
+               items(connectedDevices) { deviceInfo ->
+                   ConnectedDeviceItem(
+                       deviceInfo = deviceInfo,
+                       onRequestPhyUpdate = onRequestPhyUpdate
+                   )
+               }
+           }
+           
+           Divider(modifier = Modifier.padding(vertical = 16.dp))
+       }
+       
+       // Paired devices section
+       Text(
+           "Paired Devices",
+           style = MaterialTheme.typography.titleMedium,
+           modifier = Modifier.padding(bottom = 8.dp)
+       )
+       
        Button(onClick = onStartScan) {
-           Text("Show Paired Devices")
+           Text("Refresh Paired Devices")
        }
        Spacer(modifier = Modifier.height(16.dp))
 
-       LazyColumn(modifier = Modifier.fillMaxWidth()) {
+       LazyColumn(
+           modifier = Modifier
+               .fillMaxWidth()
+               .weight(1f)
+       ) {
            items(devices) { device ->
                DeviceItem(device = device)
            }
@@ -701,6 +771,95 @@ fun DeviceItem(device: BluetoothDevice) {
        Column(modifier = Modifier.padding(16.dp)) {
            Text(text = device.name ?: "Unknown Device", style = MaterialTheme.typography.bodyLarge)
            Text(text = device.address, style = MaterialTheme.typography.bodySmall)
+       }
+   }
+}
+
+@Composable
+fun ConnectedDeviceItem(
+   deviceInfo: com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager.DeviceInfo,
+   onRequestPhyUpdate: (String) -> Unit
+) {
+   Card(
+       modifier = Modifier
+           .fillMaxWidth()
+           .padding(vertical = 4.dp)
+   ) {
+       Column(modifier = Modifier.padding(16.dp)) {
+           // Device name and address
+           Text(
+               text = deviceInfo.name,
+               style = MaterialTheme.typography.bodyLarge,
+               fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+           )
+           Text(
+               text = deviceInfo.address,
+               style = MaterialTheme.typography.bodySmall,
+               color = MaterialTheme.colorScheme.onSurfaceVariant
+           )
+           
+           Spacer(modifier = Modifier.height(8.dp))
+           
+           // Connection details
+           Row(modifier = Modifier.fillMaxWidth()) {
+               Column(modifier = Modifier.weight(1f)) {
+                   Text("MTU: ${deviceInfo.mtu} bytes", style = MaterialTheme.typography.bodySmall)
+                   Text("TX PHY: ${deviceInfo.currentTxPhy}", style = MaterialTheme.typography.bodySmall)
+                   Text("RX PHY: ${deviceInfo.currentRxPhy}", style = MaterialTheme.typography.bodySmall)
+               }
+               Column(modifier = Modifier.weight(1f)) {
+                   Text(
+                       "Binary Protocol: ${if (deviceInfo.supportsBinaryProtocol) "✓" else "✗"}",
+                       style = MaterialTheme.typography.bodySmall
+                   )
+                   Text(
+                       "2M PHY Support: ${if (deviceInfo.supports2MPHY) "✓" else "✗"}",
+                       style = MaterialTheme.typography.bodySmall
+                   )
+                   Text(
+                       "High Priority: ${if (deviceInfo.requestHighPriority) "✓" else "✗"}",
+                       style = MaterialTheme.typography.bodySmall
+                   )
+               }
+           }
+           
+           // Subscriptions
+           if (deviceInfo.subscriptions.isNotEmpty()) {
+               Spacer(modifier = Modifier.height(4.dp))
+               Text(
+                   "Subscriptions: ${deviceInfo.subscriptions.joinToString(", ")}",
+                   style = MaterialTheme.typography.bodySmall,
+                   color = MaterialTheme.colorScheme.primary
+               )
+           }
+           
+           // Connection duration
+           val durationSeconds = deviceInfo.connectionDuration / 1000
+           val durationMinutes = durationSeconds / 60
+           val durationText = if (durationMinutes > 0) {
+               "${durationMinutes}m ${durationSeconds % 60}s"
+           } else {
+               "${durationSeconds}s"
+           }
+           Text(
+               "Connected for: $durationText",
+               style = MaterialTheme.typography.bodySmall,
+               color = MaterialTheme.colorScheme.onSurfaceVariant
+           )
+           
+           // PHY Update button if not already using 2M PHY
+           if (deviceInfo.currentTxPhy != "2M PHY" || deviceInfo.currentRxPhy != "2M PHY") {
+               Spacer(modifier = Modifier.height(8.dp))
+               Button(
+                   onClick = { onRequestPhyUpdate(deviceInfo.address) },
+                   modifier = Modifier.fillMaxWidth(),
+                   enabled = !deviceInfo.phyUpdateAttempted
+               ) {
+                   Text(
+                       if (deviceInfo.phyUpdateAttempted) "PHY Update Requested" else "Enable 2M PHY"
+                   )
+               }
+           }
        }
    }
 }

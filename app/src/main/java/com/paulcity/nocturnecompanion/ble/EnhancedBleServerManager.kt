@@ -104,7 +104,11 @@ class EnhancedBleServerManager(
         val subscriptions: MutableSet<String> = mutableSetOf(),
         var lastActivity: Long = System.currentTimeMillis(),
         var supportsBinaryProtocol: Boolean = false, // Track binary protocol support
-        var requestHighPriority: Boolean = false // Request high priority connection
+        var requestHighPriority: Boolean = false, // Request high priority connection
+        var supports2MPHY: Boolean = false, // Track 2M PHY support
+        var currentTxPhy: Int = BluetoothDevice.PHY_LE_1M, // Current TX PHY
+        var currentRxPhy: Int = BluetoothDevice.PHY_LE_1M, // Current RX PHY
+        var phyUpdateAttempted: Boolean = false
     )
     
     data class DeviceInfo(
@@ -112,7 +116,13 @@ class EnhancedBleServerManager(
         val name: String,
         val mtu: Int,
         val connectionDuration: Long,
-        val subscriptions: List<String>
+        val subscriptions: List<String>,
+        val supportsBinaryProtocol: Boolean = false,
+        val supports2MPHY: Boolean = false,
+        val currentTxPhy: String = "Unknown",
+        val currentRxPhy: String = "Unknown",
+        val phyUpdateAttempted: Boolean = false,
+        val requestHighPriority: Boolean = false
     )
     
     // Removed - now using binary protocol only
@@ -304,6 +314,24 @@ class EnhancedBleServerManager(
                                 Log.d(TAG, "Marked device ${device.address} for high priority connection")
                             } catch (e: Exception) {
                                 Log.w(TAG, "Failed to mark for high priority", e)
+                            }
+                        }
+                        
+                        // Automatically request 2M PHY for better performance
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            CoroutineScope(Dispatchers.Main).launch {
+                                delay(1000) // Give connection time to stabilize
+                                Log.d(TAG, "Auto-requesting 2M PHY for newly connected device ${device.address}")
+                                gattServer?.setPreferredPhy(
+                                    device,
+                                    BluetoothDevice.PHY_LE_2M,  // TX PHY
+                                    BluetoothDevice.PHY_LE_2M,  // RX PHY
+                                    BluetoothDevice.PHY_OPTION_NO_PREFERRED
+                                )
+                                
+                                // Read PHY after requesting to verify
+                                delay(500)
+                                gattServer?.readPhy(device)
                             }
                         }
                         
@@ -699,6 +727,43 @@ class EnhancedBleServerManager(
                 _debugLogs.emit(debugLogger.getRecentLogs(1).firstOrNull() ?: return@launch)
             }
         }
+        
+        override fun onPhyRead(device: BluetoothDevice, txPhy: Int, rxPhy: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.d(TAG, "PHY read for ${device.address}: TX=$txPhy, RX=$rxPhy")
+                connectedDevices[device.address]?.let {
+                    it.currentTxPhy = txPhy
+                    it.currentRxPhy = rxPhy
+                }
+                updateConnectedDevicesList()
+            }
+        }
+        
+        override fun onPhyUpdate(device: BluetoothDevice, txPhy: Int, rxPhy: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.d(TAG, "PHY updated for ${device.address}: TX=$txPhy, RX=$rxPhy")
+                connectedDevices[device.address]?.let {
+                    it.currentTxPhy = txPhy
+                    it.currentRxPhy = rxPhy
+                    it.supports2MPHY = (txPhy == BluetoothDevice.PHY_LE_2M || rxPhy == BluetoothDevice.PHY_LE_2M)
+                }
+                
+                debugLogger.info(
+                    "PHY_UPDATE",
+                    "PHY configuration updated",
+                    mapOf(
+                        "device" to device.address,
+                        "tx_phy" to getPhyName(txPhy),
+                        "rx_phy" to getPhyName(rxPhy),
+                        "status" to if (status == BluetoothGatt.GATT_SUCCESS) "success" else "failed"
+                    )
+                )
+                
+                updateConnectedDevicesList()
+            } else {
+                Log.e(TAG, "PHY update failed for ${device.address}: status=$status")
+            }
+        }
     }
     
     private fun startAdvertising() {
@@ -960,6 +1025,21 @@ class EnhancedBleServerManager(
         }
     }
     
+    // Method to send custom JSON data (for speed test)
+    fun sendCustomData(data: Map<String, Any>) {
+        val json = gson.toJson(data)
+        Log.d(TAG, "Sending custom data: $json")
+        
+        // Determine priority based on data type
+        val priority = when {
+            data["type"] == "pong" -> MessageQueue.Priority.HIGH
+            data["type"]?.toString()?.contains("throughput") == true -> MessageQueue.Priority.NORMAL
+            else -> MessageQueue.Priority.NORMAL
+        }
+        
+        sendNotificationToAll(BleConstants.STATE_TX_CHAR_UUID, json, priority)
+    }
+    
     // Removed - using binary protocol only
     /*
     fun sendStateUpdate(data: Any) {
@@ -990,6 +1070,91 @@ class EnhancedBleServerManager(
         }
     }
     */
+    
+    fun request2MPHY(): Boolean {
+        // Request 2M PHY for all connected devices
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            Log.w(TAG, "2M PHY requires Android O (API 26) or higher")
+            return false
+        }
+        
+        var anySuccess = false
+        connectedDevices.values.forEach { context ->
+            try {
+                // Request 2M PHY for this device through the GATT server
+                // Note: On GATT server side, we can't directly set PHY, but we can
+                // configure our preferences for when the client requests it
+                Log.d(TAG, "BLE_LOG: Ready to accept 2M PHY from device ${context.device.address}")
+                
+                // Set flag that we support 2M PHY
+                context.supports2MPHY = true
+                anySuccess = true
+                
+                // The actual PHY negotiation happens when the central (nocturned) requests it
+                // We just mark that we're ready to support it
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to prepare for 2M PHY on device ${context.device.address}", e)
+            }
+        }
+        
+        if (anySuccess) {
+            Log.d(TAG, "BLE_LOG: Server ready to accept 2M PHY requests")
+        }
+        
+        return anySuccess
+    }
+    
+    fun requestPhyUpdateForDevice(deviceAddress: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            Log.w(TAG, "PHY update requires Android O (API 26) or higher")
+            return false
+        }
+        
+        val context = connectedDevices[deviceAddress]
+        if (context == null) {
+            Log.e(TAG, "Device $deviceAddress not found in connected devices")
+            return false
+        }
+        
+        try {
+            // Mark that we've attempted PHY update
+            context.phyUpdateAttempted = true
+            context.supports2MPHY = true
+            
+            updateConnectedDevicesList()
+            
+            // Request PHY update through the GATT server
+            // The GATT server (Android side) needs to initiate the PHY change, not the client
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // Request 2M PHY for both TX and RX
+                gattServer?.setPreferredPhy(
+                    context.device,
+                    BluetoothDevice.PHY_LE_2M,  // TX PHY  
+                    BluetoothDevice.PHY_LE_2M,  // RX PHY
+                    BluetoothDevice.PHY_OPTION_NO_PREFERRED  // PHY options
+                )
+                
+                Log.d(TAG, "PHY update requested for ${context.device.address} via GATT server")
+                Log.d(TAG, "Requesting 2M PHY for both TX and RX")
+                
+                // Also read current PHY to verify after a short delay
+                CoroutineScope(Dispatchers.Main).launch {
+                    delay(500) // Give time for PHY to update
+                    gattServer?.readPhy(context.device)
+                    Log.d(TAG, "Reading PHY status after update request")
+                }
+                
+                return true
+            }
+            
+            Log.w(TAG, "PHY update not supported on this Android version")
+            return false
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to request PHY update for $deviceAddress", e)
+            return false
+        }
+    }
     
     private fun sendNotificationToAll(characteristicUuid: UUID, data: String, priority: MessageQueue.Priority = MessageQueue.Priority.NORMAL) {
         val dataBytes = data.toByteArray(Charsets.UTF_8)
@@ -1731,10 +1896,25 @@ class EnhancedBleServerManager(
                         BleConstants.ALBUM_ART_TX_CHAR_UUID.toString() -> "Album Art"
                         else -> "Unknown"
                     }
-                }
+                },
+                supportsBinaryProtocol = context.supportsBinaryProtocol,
+                supports2MPHY = context.supports2MPHY,
+                currentTxPhy = getPhyName(context.currentTxPhy),
+                currentRxPhy = getPhyName(context.currentRxPhy),
+                phyUpdateAttempted = context.phyUpdateAttempted,
+                requestHighPriority = context.requestHighPriority
             )
         }
         _connectedDevicesList.value = devices
+    }
+    
+    private fun getPhyName(phy: Int): String {
+        return when (phy) {
+            BluetoothDevice.PHY_LE_1M -> "1M PHY"
+            BluetoothDevice.PHY_LE_2M -> "2M PHY"
+            BluetoothDevice.PHY_LE_CODED -> "Coded PHY"
+            else -> "Unknown"
+        }
     }
     
     private fun handleAlbumArtQuery(device: BluetoothDevice, trackId: String, requestedChecksum: String) {

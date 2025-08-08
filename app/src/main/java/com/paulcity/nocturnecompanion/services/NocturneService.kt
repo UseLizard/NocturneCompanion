@@ -72,13 +72,16 @@ class NocturneService : Service() {
                            val timeSyncData = gson.fromJson(jsonData, Map::class.java)
                            Log.d("NocturneService", "Debug time sync received: $timeSyncData")
                            
-                           // Send time sync via BLE using sendStateUpdate which handles any data type
+                           // Time sync now handled by binary protocol in NocturneServiceBLE
+                           // This service is deprecated - use NocturneServiceBLE instead
+                           /*
                            serviceScope.launch {
                                if (::bleServerManager.isInitialized) {
                                    bleServerManager.sendStateUpdate(timeSyncData)
                                    Log.d("NocturneService", "Sent time sync via BLE")
                                }
                            }
+                           */
                        } catch (e: Exception) {
                            Log.e("NocturneService", "Failed to process debug time sync", e)
                        }

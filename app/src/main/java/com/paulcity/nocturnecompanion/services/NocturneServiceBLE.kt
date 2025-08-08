@@ -22,6 +22,7 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.gson.Gson
 import com.paulcity.nocturnecompanion.ble.BinaryProtocol
 import com.paulcity.nocturnecompanion.ble.BinaryProtocolV2
+import com.paulcity.nocturnecompanion.ble.BleConstants
 import com.paulcity.nocturnecompanion.data.Command
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import com.paulcity.nocturnecompanion.data.AudioEvent
@@ -340,6 +341,15 @@ class NocturneServiceBLE : Service() {
                     stopSelf()
                     return START_NOT_STICKY // Don't restart when stopped intentionally
                 }
+                "com.paulcity.nocturnecompanion.REQUEST_PHY_UPDATE" -> {
+                    val deviceAddress = intent.getStringExtra("device_address")
+                    if (deviceAddress != null && ::bleServerManager.isInitialized) {
+                        Log.d(TAG, "Requesting PHY update for device: $deviceAddress")
+                        bleServerManager.requestPhyUpdateForDevice(deviceAddress)
+                    } else {
+                        Log.w(TAG, "Cannot request PHY update: device address null or BLE server not initialized")
+                    }
+                }
                 else -> {
                     Log.w(TAG, "Unknown action: ${intent?.action}")
                 }
@@ -587,6 +597,22 @@ class NocturneServiceBLE : Service() {
                             
                             Log.d(TAG, "Volume set to $percent% (raw: $targetVolume/$maxVolume)")
                         }
+                    }
+                    "ping" -> {
+                        // Speed test ping - immediately send pong response
+                        handlePingCommand(command)
+                    }
+                    "bt_speed_test" -> {
+                        // Start speed test sequence
+                        handleSpeedTestCommand(command)
+                    }
+                    "throughput_test" -> {
+                        // Handle throughput test data chunk
+                        handleThroughputTestCommand(command)
+                    }
+                    "request_2m_phy" -> {
+                        // Handle request to switch to 2M PHY for better throughput
+                        handle2MPhyRequest(command)
                     }
                     else -> {
                         Log.w(TAG, "Unknown command: ${command.command}")
@@ -1693,4 +1719,96 @@ class NocturneServiceBLE : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+    
+    // Speed test handler functions
+    private fun handlePingCommand(command: Command) {
+        // Immediately send pong response with the same timestamp
+        val commandId = command.payload?.get("command_id") as? String ?: ""
+        val timestamp = command.payload?.get("timestamp") as? Long ?: System.currentTimeMillis()
+        
+        val pongData = mapOf(
+            "type" to "pong",
+            "command_id" to commandId,
+            "timestamp" to timestamp,
+            "received_at" to System.currentTimeMillis()
+        )
+        
+        bleServerManager.sendCustomData(pongData)
+        Log.d(TAG, "BLE_LOG: Sent pong response for ping $commandId")
+    }
+    
+    private fun handleSpeedTestCommand(command: Command) {
+        Log.d(TAG, "BLE_LOG: Starting BT speed test sequence")
+        
+        val commandId = command.payload?.get("command_id") as? String ?: ""
+        
+        // Send acknowledgment that speed test is starting
+        val startData = mapOf(
+            "type" to "speed_test_started",
+            "command_id" to commandId,
+            "timestamp" to System.currentTimeMillis()
+        )
+        
+        bleServerManager.sendCustomData(startData)
+    }
+    
+    private fun handleThroughputTestCommand(command: Command) {
+        // Extract the chunk info from command payload
+        val commandId = command.payload?.get("command_id") as? String ?: ""
+        val chunkNum = (command.payload?.get("chunk_num") as? Double)?.toInt() ?: 0
+        val total = (command.payload?.get("total") as? Double)?.toInt() ?: 0
+        
+        // Get the size directly from payload (no actual data transferred for speed test)
+        val dataSize = (command.payload?.get("size") as? Double)?.toInt() ?: 0
+        
+        // Send acknowledgment with chunk info
+        val ackData = mapOf(
+            "type" to "throughput_chunk_ack",
+            "command_id" to commandId,
+            "chunk_num" to chunkNum,
+            "total_chunks" to total,
+            "data_size" to dataSize,
+            "timestamp" to System.currentTimeMillis()
+        )
+        
+        bleServerManager.sendCustomData(ackData)
+        
+        Log.d(TAG, "BLE_LOG: Throughput test chunk $chunkNum/$total received (${dataSize} bytes)")
+        
+        // If this is the last chunk, send completion
+        if (chunkNum == total - 1) {
+            serviceScope.launch {
+                delay(100)
+                val completeData = mapOf(
+                    "type" to "throughput_test_complete",
+                    "total_chunks" to total,
+                    "timestamp" to System.currentTimeMillis()
+                )
+                bleServerManager.sendCustomData(completeData)
+                Log.d(TAG, "BLE_LOG: Throughput test completed")
+            }
+        }
+    }
+    
+    private fun handle2MPhyRequest(command: Command) {
+        // Request 2M PHY from the BLE server manager
+        val commandId = command.payload?.get("command_id") as? String ?: ""
+        
+        Log.d(TAG, "BLE_LOG: Received request to switch to 2M PHY")
+        
+        // Request PHY change through the BLE server manager
+        val success = bleServerManager.request2MPHY()
+        
+        // Send response back
+        val responseData = mapOf(
+            "type" to "2m_phy_response",
+            "command_id" to commandId,
+            "success" to success,
+            "timestamp" to System.currentTimeMillis()
+        )
+        
+        bleServerManager.sendCustomData(responseData)
+        
+        Log.d(TAG, "BLE_LOG: 2M PHY request ${if (success) "initiated" else "failed"}")
+    }
 }
