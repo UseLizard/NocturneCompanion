@@ -5,8 +5,10 @@ import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.media.MediaMetadata
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import java.io.ByteArrayOutputStream
@@ -303,5 +305,34 @@ class MediaStoreAlbumArtManager(private val context: Context) {
      */
     fun clearCache() {
         albumArtManager.clearCache()
+    }
+    
+    /**
+     * Get album art as a Bitmap for display in the UI
+     */
+    fun getAlbumArtBitmap(artist: String?, album: String?, title: String?): Bitmap? {
+        // Try to get album art from MediaStore
+        val albumId = getAlbumId(artist, album)
+        if (albumId != null) {
+            val albumArtUri = ContentUris.withAppendedId(
+                Uri.parse("content://media/external/audio/albumart"),
+                albumId
+            )
+            
+            return try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val source = ImageDecoder.createSource(contentResolver, albumArtUri)
+                    ImageDecoder.decodeBitmap(source)
+                } else {
+                    @Suppress("DEPRECATION")
+                    MediaStore.Images.Media.getBitmap(contentResolver, albumArtUri)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to load album art bitmap for albumId: $albumId", e)
+                null
+            }
+        }
+        
+        return null
     }
 }

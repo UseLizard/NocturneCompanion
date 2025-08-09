@@ -32,7 +32,7 @@
         android:theme="@style/Theme.NocturneCompanion"
         tools:targetApi="34">
         <activity
-            android:name=".ui.MainActivity"
+            android:name=".ui.UnifiedMainActivity"
             android:exported="true"
             android:theme="@style/Theme.NocturneCompanion">
             <intent-filter>
@@ -40,11 +40,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        
-        <activity
-            android:name=".ui.DebugActivity"
-            android:exported="false"
-            android:theme="@style/Theme.NocturneCompanion" />
 
         <service
             android:name=".services.NocturneService"
