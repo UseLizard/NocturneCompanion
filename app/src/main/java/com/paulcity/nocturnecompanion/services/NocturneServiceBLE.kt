@@ -133,6 +133,10 @@ class NocturneServiceBLE : Service() {
                         bleServerManager.sendTestAlbumArtCommand()
                     }
                 }
+                ACTION_SEND_TIME_SYNC -> {
+                    Log.d(TAG, "Received manual time sync request broadcast")
+                    sendTimeSync()
+                }
             }
         }
     }
@@ -255,6 +259,7 @@ class NocturneServiceBLE : Service() {
         const val ACTION_NOTIFICATION = "com.paulcity.nocturnecompanion.NOTIFICATION"
         const val ACTION_UPDATE_ALBUM_ART_SETTINGS = "com.paulcity.nocturnecompanion.UPDATE_ALBUM_ART_SETTINGS"
         const val ACTION_TEST_ALBUM_ART = "com.paulcity.nocturnecompanion.TEST_ALBUM_ART_COMMAND"
+        const val ACTION_SEND_TIME_SYNC = "com.paulcity.nocturnecompanion.SEND_BLE_TIME_SYNC"
         const val ACTION_AUDIO_EVENT = "com.paulcity.nocturnecompanion.AUDIO_EVENT"
         
         // Extras
@@ -294,6 +299,7 @@ class NocturneServiceBLE : Service() {
             val filter = IntentFilter().apply {
                 addAction(ACTION_UPDATE_ALBUM_ART_SETTINGS)
                 addAction(ACTION_TEST_ALBUM_ART)
+                addAction(ACTION_SEND_TIME_SYNC)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(settingsUpdateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)

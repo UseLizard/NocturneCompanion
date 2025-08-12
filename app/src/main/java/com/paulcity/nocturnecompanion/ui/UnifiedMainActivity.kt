@@ -381,7 +381,7 @@ class UnifiedMainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     fun UnifiedMainScreen() {
-        val tabTitles = listOf("Status", "Devices", "Connection", "Transfer", "Media", "Commands", "Logs", "Audio", "Settings")
+        val tabTitles = listOf("Status", "Devices", "Connection", "Transfer", "Media", "Commands", "Logs", "Audio", "Podcasts", "Settings")
         
         Column(modifier = Modifier.fillMaxSize()) {
             TopAppBar(
@@ -450,7 +450,8 @@ class UnifiedMainActivity : ComponentActivity() {
                     audioEvents = audioEvents,
                     onClearEvents = { audioEvents.clear() }
                 )
-                8 -> SettingsTab()
+                8 -> PodcastTab()
+                9 -> SettingsTab()
             }
         }
     }

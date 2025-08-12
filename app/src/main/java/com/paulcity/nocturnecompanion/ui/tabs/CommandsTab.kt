@@ -60,7 +60,7 @@ fun CommandsTab(
                     modifier = Modifier.fillMaxWidth(),
                     enabled = connectedDevicesCount > 0
                 ) {
-                    Text("Send Test Time Sync")
+                    Text("Send Time Sync")
                 }
                 
                 Spacer(modifier = Modifier.height(8.dp))
