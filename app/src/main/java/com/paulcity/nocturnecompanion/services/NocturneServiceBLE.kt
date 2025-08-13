@@ -1,5 +1,7 @@
 package com.paulcity.nocturnecompanion.services
 
+import android.annotation.SuppressLint
+
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -22,8 +24,8 @@ import android.bluetooth.BluetoothAdapter
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.gson.Gson
-import com.paulcity.nocturnecompanion.ble.BinaryProtocol
-import com.paulcity.nocturnecompanion.ble.BinaryProtocolV2
+import com.paulcity.nocturnecompanion.ble.protocol.BinaryProtocol
+import com.paulcity.nocturnecompanion.ble.protocol.BinaryProtocolV2
 import com.paulcity.nocturnecompanion.ble.BleConstants
 import com.paulcity.nocturnecompanion.data.Command
 import com.paulcity.nocturnecompanion.data.StateUpdate
@@ -272,6 +274,7 @@ class NocturneServiceBLE : Service() {
         const val EXTRA_AUDIO_EVENT = "audio_event"
     }
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "onCreate() called")

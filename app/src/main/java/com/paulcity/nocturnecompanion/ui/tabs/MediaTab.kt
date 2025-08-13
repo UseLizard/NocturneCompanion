@@ -17,19 +17,11 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.paulcity.nocturnecompanion.data.StateUpdate
-import com.paulcity.nocturnecompanion.ui.tabs.components.InfoChip
-import com.paulcity.nocturnecompanion.ui.tabs.components.formatTime
+import com.paulcity.nocturnecompanion.ui.AlbumArtInfo
+import com.paulcity.nocturnecompanion.ui.components.InfoChip
+import com.paulcity.nocturnecompanion.ui.components.formatTime
 import java.text.SimpleDateFormat
 import java.util.*
-
-data class AlbumArtInfo(
-    val hasArt: Boolean,
-    val checksum: String? = null,
-    val size: Int = 0,
-    val lastQuery: String? = null,
-    val lastTransferTime: Long? = null,
-    val bitmap: Bitmap? = null
-)
 
 @Composable
 fun MediaTab(

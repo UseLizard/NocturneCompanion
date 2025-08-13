@@ -21,6 +21,9 @@ import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
 import com.google.gson.Gson
+import com.paulcity.nocturnecompanion.ble.protocol.BinaryProtocol
+import com.paulcity.nocturnecompanion.ble.protocol.BinaryAlbumArtEncoder
+import com.paulcity.nocturnecompanion.ble.protocol.BinaryProtocolV2
 import com.paulcity.nocturnecompanion.data.Command
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import com.paulcity.nocturnecompanion.services.NocturneNotificationListener

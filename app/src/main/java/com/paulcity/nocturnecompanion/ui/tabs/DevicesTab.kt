@@ -18,14 +18,12 @@ import com.paulcity.nocturnecompanion.ui.theme.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager
-import com.paulcity.nocturnecompanion.ui.tabs.components.InfoChip
-import com.paulcity.nocturnecompanion.ui.tabs.components.SubscriptionChip
+import com.paulcity.nocturnecompanion.ui.components.InfoChip
+import com.paulcity.nocturnecompanion.ui.components.SubscriptionChip
 
 @Composable
 fun DevicesTab(
     connectedDevices: List<EnhancedBleServerManager.DeviceInfo>,
-    discoveredDevices: List<Any>,  // Keep parameter for compatibility but ignore it
-    onScanClick: () -> Unit,  // Keep parameter for compatibility but ignore it
     onRequestPhyUpdate: (String) -> Unit
 ) {
     if (connectedDevices.isEmpty()) {
