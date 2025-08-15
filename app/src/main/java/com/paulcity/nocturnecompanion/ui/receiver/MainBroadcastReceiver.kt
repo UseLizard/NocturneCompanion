@@ -4,6 +4,7 @@ import android.bluetooth.BluetoothAdapter
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import com.paulcity.nocturnecompanion.services.NocturneServiceBLE
 import com.paulcity.nocturnecompanion.ui.UnifiedMainViewModel
 
@@ -37,6 +38,12 @@ class MainBroadcastReceiver(private val viewModel: UnifiedMainViewModel) : Broad
             BluetoothAdapter.ACTION_STATE_CHANGED -> {
                 val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
                 viewModel.onBluetoothStateChanged(state == BluetoothAdapter.STATE_ON)
+            }
+            "com.paulcity.nocturnecompanion.REQUEST_WEATHER_REFRESH" -> {
+                Log.d("MainBroadcastReceiver", "Received REQUEST_WEATHER_REFRESH broadcast")
+                // Service is requesting current weather data to be sent
+                viewModel.refreshWeatherForBle()
+                Log.d("MainBroadcastReceiver", "Called viewModel.refreshWeatherForBle()")
             }
         }
     }

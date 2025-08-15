@@ -27,6 +27,7 @@ import com.google.gson.Gson
 import com.paulcity.nocturnecompanion.ble.protocol.BinaryProtocol
 import com.paulcity.nocturnecompanion.ble.protocol.BinaryProtocolV2
 import com.paulcity.nocturnecompanion.ble.BleConstants
+import com.paulcity.nocturnecompanion.ble.WeatherBleManager
 import com.paulcity.nocturnecompanion.data.Command
 import com.paulcity.nocturnecompanion.data.StateUpdate
 import com.paulcity.nocturnecompanion.data.AudioEvent
@@ -49,6 +50,7 @@ class NocturneServiceBLE : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
     private lateinit var bleServerManager: EnhancedBleServerManager
+    private lateinit var weatherBleManager: WeatherBleManager
     private lateinit var audioManager: AudioManager
     private val gson = Gson()
     
@@ -361,6 +363,23 @@ class NocturneServiceBLE : Service() {
                         Log.w(TAG, "Cannot request PHY update: device address null or BLE server not initialized")
                     }
                 }
+                "SEND_WEATHER_UPDATE" -> {
+                    val weatherDataJson = intent.getStringExtra("weather_data")
+                    val locationName = intent.getStringExtra("location_name")
+                    val isCurrentLocation = intent.getBooleanExtra("is_current_location", false)
+                    
+                    if (weatherDataJson != null && locationName != null) {
+                        try {
+                            val weatherResponse = gson.fromJson(weatherDataJson, com.paulcity.nocturnecompanion.data.WeatherResponse::class.java)
+                            Log.d(TAG, "Received weather update request for: $locationName")
+                            sendWeatherUpdate(weatherResponse, locationName, isCurrentLocation)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error parsing weather data", e)
+                        }
+                    } else {
+                        Log.w(TAG, "Missing weather data or location name in SEND_WEATHER_UPDATE intent")
+                    }
+                }
                 else -> {
                     Log.w(TAG, "Unknown action: ${intent?.action}")
                 }
@@ -425,20 +444,50 @@ class NocturneServiceBLE : Service() {
                 
                 // Send initial data now that notifications are enabled
                 serviceScope.launch {
+                    // First ensure we have optimal connection parameters for high-speed data transfer
+                    Log.d(TAG, "Optimizing connection parameters for high-speed data transfer")
+                    
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        try {
+                            val optimized = bleServerManager.optimizeConnectionForDevice(device.address)
+                            if (optimized) {
+                                Log.d(TAG, "BLE_LOG: Connection optimized successfully for ${device.address}")
+                            } else {
+                                Log.w(TAG, "BLE_LOG: Connection optimization failed for ${device.address}")
+                            }
+                            delay(200) // Allow connection optimization to complete
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Connection optimization failed, continuing with standard connection: ${e.message}")
+                        }
+                    } else {
+                        Log.d(TAG, "Connection optimization not available on this Android version")
+                    }
+                    
                     // Send time sync first
                     Log.d(TAG, "Sending time sync to ready device")
                     sendTimeSync()
                     
-                    // Small delay between messages
-                    delay(50)
+                    // Short delay between messages
+                    delay(100)
                     
                     // Then send current media state
                     Log.d(TAG, "Sending initial media state to ready device")
                     sendStateUpdate()
+                    
+                    // Longer delay before weather to ensure previous messages are processed
+                    delay(200)
+                    
+                    // Send current weather data if available
+                    Log.d(TAG, "Sending initial weather data to ready device")
+                    sendInitialWeatherData()
                 }
             }
         )
         bleServerManager.startServer()
+        
+        // Initialize weather manager
+        weatherBleManager = WeatherBleManager(bleServerManager)
+        Log.d(TAG, "WeatherBleManager initialized")
         
         Log.d(TAG, "BLE server initialized")
     }
@@ -499,6 +548,37 @@ class NocturneServiceBLE : Service() {
                 Log.d(TAG, "State update triggered for track refresh")
                 
                 Log.d(TAG, "Exiting request_track_refresh handler")
+                return
+            }
+            "refresh_weather" -> {
+                Log.d(TAG, "Weather refresh requested from nocturned")
+                weatherBleManager.handleWeatherRefreshRequest()
+                
+                // Check if we have cached weather data to send immediately
+                try {
+                    val sharedPrefs = getSharedPreferences("weather_cache", Context.MODE_PRIVATE)
+                    val cachedWeatherJson = sharedPrefs.getString("weather_data", null)
+                    val cachedLocationName = sharedPrefs.getString("location_name", null)
+                    val cachedIsCurrentLocation = sharedPrefs.getBoolean("is_current_location", false)
+                    val cacheTimestamp = sharedPrefs.getLong("cache_timestamp", 0)
+                    val isCacheValid = (System.currentTimeMillis() - cacheTimestamp) < (30 * 60 * 1000) // 30 minutes
+                    
+                    if (cachedWeatherJson != null && cachedLocationName != null && isCacheValid) {
+                        Log.d(TAG, "Sending cached weather data in response to refresh_weather command")
+                        val weatherResponse = gson.fromJson(cachedWeatherJson, com.paulcity.nocturnecompanion.data.WeatherResponse::class.java)
+                        sendWeatherUpdate(weatherResponse, cachedLocationName, cachedIsCurrentLocation)
+                    } else {
+                        Log.d(TAG, "No valid cached weather data, requesting fresh data from ViewModel")
+                        // Only request fresh data if no valid cache exists
+                        val intent = Intent("com.paulcity.nocturnecompanion.REQUEST_WEATHER_REFRESH")
+                        sendBroadcast(intent)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error handling weather refresh request", e)
+                    // Fallback: request fresh data
+                    val intent = Intent("com.paulcity.nocturnecompanion.REQUEST_WEATHER_REFRESH")
+                    sendBroadcast(intent)
+                }
                 return
             }
             "album_art_query" -> {
@@ -1059,6 +1139,79 @@ class NocturneServiceBLE : Service() {
                 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send time sync", e)
+            }
+        }
+    }
+    
+    /**
+     * Send weather update via BLE
+     * Called by ViewModel when weather data changes
+     */
+    fun sendWeatherUpdate(weatherResponse: com.paulcity.nocturnecompanion.data.WeatherResponse, locationName: String, isCurrentLocation: Boolean) {
+        if (::weatherBleManager.isInitialized) {
+            Log.d(TAG, "Sending weather update for location: $locationName")
+            
+            // Cache weather data for future connections
+            try {
+                val prefs = getSharedPreferences("weather_cache", Context.MODE_PRIVATE)
+                prefs.edit().apply {
+                    putString("last_weather_data", gson.toJson(weatherResponse))
+                    putString("last_location_name", locationName)
+                    putBoolean("last_is_current_location", isCurrentLocation)
+                    putLong("cache_timestamp", System.currentTimeMillis())
+                    apply()
+                }
+                Log.d(TAG, "Weather data cached for future connections")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to cache weather data", e)
+            }
+            
+            weatherBleManager.sendWeatherUpdate(weatherResponse, locationName, isCurrentLocation)
+        } else {
+            Log.w(TAG, "WeatherBleManager not initialized, cannot send weather update")
+        }
+    }
+    
+    /**
+     * Send initial weather data when a device connects
+     * Try to get current weather data, or request fresh data if none available
+     */
+    private fun sendInitialWeatherData() {
+        Log.d(TAG, "Attempting to send initial weather data")
+        
+        serviceScope.launch {
+            try {
+                // First, try to get weather data from SharedPreferences cache
+                val prefs = getSharedPreferences("weather_cache", Context.MODE_PRIVATE)
+                val cachedWeatherJson = prefs.getString("last_weather_data", null)
+                val cachedLocationName = prefs.getString("last_location_name", null)
+                val cachedIsCurrentLocation = prefs.getBoolean("last_is_current_location", false)
+                val cacheTimestamp = prefs.getLong("cache_timestamp", 0)
+                
+                // Check if cache is recent (less than 30 minutes old)
+                val cacheAge = System.currentTimeMillis() - cacheTimestamp
+                val isCacheValid = cacheAge < 30 * 60 * 1000 // 30 minutes
+                
+                if (cachedWeatherJson != null && cachedLocationName != null && isCacheValid) {
+                    Log.d(TAG, "Sending cached weather data to new device")
+                    
+                    // Parse cached weather data and send it
+                    val weatherResponse = gson.fromJson(cachedWeatherJson, com.paulcity.nocturnecompanion.data.WeatherResponse::class.java)
+                    sendWeatherUpdate(weatherResponse, cachedLocationName, cachedIsCurrentLocation)
+                } else {
+                    Log.d(TAG, "No valid cached weather data, requesting refresh from ViewModel")
+                    
+                    // No valid cache, request fresh data
+                    val intent = Intent("com.paulcity.nocturnecompanion.REQUEST_WEATHER_REFRESH")
+                    sendBroadcast(intent)
+                }
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending initial weather data", e)
+                
+                // Fallback: request fresh data
+                val intent = Intent("com.paulcity.nocturnecompanion.REQUEST_WEATHER_REFRESH")
+                sendBroadcast(intent)
             }
         }
     }

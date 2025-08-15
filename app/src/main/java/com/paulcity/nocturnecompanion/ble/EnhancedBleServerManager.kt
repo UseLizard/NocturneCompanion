@@ -320,11 +320,13 @@ class EnhancedBleServerManager(
                             }
                         }
                         
-                        // Automatically request 2M PHY for better performance
+                        // Automatically negotiate best available PHY for optimal performance
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                             CoroutineScope(Dispatchers.Main).launch {
-                                delay(1000) // Give connection time to stabilize
-                                Log.d(TAG, "Auto-requesting 2M PHY for newly connected device ${device.address}")
+                                delay(200) // Allow connection to stabilize
+                                Log.d(TAG, "BLE_LOG: Starting PHY negotiation for newly connected device ${device.address}")
+                                
+                                // Try 2M PHY first for best performance
                                 gattServer?.setPreferredPhy(
                                     device,
                                     BluetoothDevice.PHY_LE_2M,  // TX PHY
@@ -332,9 +334,25 @@ class EnhancedBleServerManager(
                                     BluetoothDevice.PHY_OPTION_NO_PREFERRED
                                 )
                                 
-                                // Read PHY after requesting to verify
-                                delay(500)
+                                // Check result and fallback to 1M if needed
+                                delay(400) // Give more time for 2M PHY negotiation
                                 gattServer?.readPhy(device)
+                                
+                                delay(300) // Wait for PHY read result
+                                val deviceContext = connectedDevices[device.address]
+                                if (deviceContext != null && !deviceContext.supports2MPHY) {
+                                    Log.d(TAG, "BLE_LOG: 2M PHY not supported, falling back to 1M PHY for ${device.address}")
+                                    gattServer?.setPreferredPhy(
+                                        device,
+                                        BluetoothDevice.PHY_LE_1M,  // TX PHY
+                                        BluetoothDevice.PHY_LE_1M,  // RX PHY
+                                        BluetoothDevice.PHY_OPTION_NO_PREFERRED
+                                    )
+                                    delay(300)
+                                    gattServer?.readPhy(device)
+                                }
+                                
+                                Log.d(TAG, "BLE_LOG: Initial PHY negotiation completed for ${device.address}")
                             }
                         }
                         
@@ -774,11 +792,13 @@ class EnhancedBleServerManager(
         
         override fun onPhyUpdate(device: BluetoothDevice, txPhy: Int, rxPhy: Int, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.d(TAG, "PHY updated for ${device.address}: TX=$txPhy, RX=$rxPhy")
+                val isHighSpeed = (txPhy == BluetoothDevice.PHY_LE_2M || rxPhy == BluetoothDevice.PHY_LE_2M)
+                Log.d(TAG, "BLE_LOG: PHY updated for ${device.address}: TX=${getPhyName(txPhy)}, RX=${getPhyName(rxPhy)} - High-speed: $isHighSpeed")
+                
                 connectedDevices[device.address]?.let {
                     it.currentTxPhy = txPhy
                     it.currentRxPhy = rxPhy
-                    it.supports2MPHY = (txPhy == BluetoothDevice.PHY_LE_2M || rxPhy == BluetoothDevice.PHY_LE_2M)
+                    it.supports2MPHY = isHighSpeed
                 }
                 
                 debugLogger.info(
@@ -1159,7 +1179,8 @@ class EnhancedBleServerManager(
             // Request PHY update through the GATT server
             // The GATT server (Android side) needs to initiate the PHY change, not the client
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                // Request 2M PHY for both TX and RX
+                // First try 2M PHY for best performance
+                Log.d(TAG, "BLE_LOG: Attempting 2M PHY negotiation for ${context.device.address}")
                 gattServer?.setPreferredPhy(
                     context.device,
                     BluetoothDevice.PHY_LE_2M,  // TX PHY  
@@ -1167,14 +1188,32 @@ class EnhancedBleServerManager(
                     BluetoothDevice.PHY_OPTION_NO_PREFERRED  // PHY options
                 )
                 
-                Log.d(TAG, "PHY update requested for ${context.device.address} via GATT server")
-                Log.d(TAG, "Requesting 2M PHY for both TX and RX")
+                Log.d(TAG, "PHY update requested for ${context.device.address} - trying 2M PHY first")
                 
-                // Also read current PHY to verify after a short delay
+                // Check PHY result after negotiation and fallback if needed
                 CoroutineScope(Dispatchers.Main).launch {
-                    delay(500) // Give time for PHY to update
+                    delay(500) // Give time for PHY negotiation to complete
                     gattServer?.readPhy(context.device)
-                    Log.d(TAG, "Reading PHY status after update request")
+                    
+                    // Check if we got 2M PHY after another delay
+                    delay(300)
+                    val deviceContext = connectedDevices[context.device.address]
+                    if (deviceContext != null && !deviceContext.supports2MPHY) {
+                        Log.d(TAG, "BLE_LOG: 2M PHY not available, ensuring 1M PHY for ${context.device.address}")
+                        // Fallback to 1M PHY to ensure stable connection
+                        gattServer?.setPreferredPhy(
+                            context.device,
+                            BluetoothDevice.PHY_LE_1M,  // TX PHY
+                            BluetoothDevice.PHY_LE_1M,  // RX PHY  
+                            BluetoothDevice.PHY_OPTION_NO_PREFERRED
+                        )
+                        // Read PHY again to confirm
+                        delay(300)
+                        gattServer?.readPhy(context.device)
+                        Log.d(TAG, "BLE_LOG: Fallback to 1M PHY completed for ${context.device.address}")
+                    } else {
+                        Log.d(TAG, "BLE_LOG: High-speed PHY negotiation successful for ${context.device.address}")
+                    }
                 }
                 
                 return true
@@ -1185,6 +1224,45 @@ class EnhancedBleServerManager(
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to request PHY update for $deviceAddress", e)
+            return false
+        }
+    }
+    
+    /**
+     * Optimize connection parameters for high-speed data transfer
+     * Attempts 2M PHY first, falls back to 1M PHY if not supported
+     */
+    fun optimizeConnectionForDevice(deviceAddress: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            Log.w(TAG, "Connection optimization requires Android O (API 26) or higher")
+            return false
+        }
+        
+        val context = connectedDevices[deviceAddress] ?: run {
+            Log.w(TAG, "Device $deviceAddress not found in connected devices")
+            return false
+        }
+        
+        try {
+            Log.d(TAG, "BLE_LOG: Optimizing connection parameters for $deviceAddress")
+            
+            // Check current PHY status first
+            val currentPhy = if (context.supports2MPHY) "2M" else if (context.currentTxPhy == BluetoothDevice.PHY_LE_1M) "1M" else "Unknown"
+            Log.d(TAG, "BLE_LOG: Current PHY status for $deviceAddress: $currentPhy")
+            
+            // If not already optimized, request best available PHY
+            if (!context.supports2MPHY && context.currentTxPhy != BluetoothDevice.PHY_LE_1M) {
+                Log.d(TAG, "BLE_LOG: Requesting PHY optimization for $deviceAddress")
+                val phyResult = requestPhyUpdateForDevice(deviceAddress)
+                Log.d(TAG, "BLE_LOG: PHY optimization result for $deviceAddress: $phyResult")
+                return phyResult
+            } else {
+                Log.d(TAG, "BLE_LOG: Connection already optimized for $deviceAddress")
+                return true
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to optimize connection for $deviceAddress", e)
             return false
         }
     }

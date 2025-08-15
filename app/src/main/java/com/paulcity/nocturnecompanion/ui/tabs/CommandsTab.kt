@@ -21,7 +21,8 @@ fun CommandsTab(
     connectedDevicesCount: Int,
     onSendTestState: () -> Unit,
     onSendTestTimeSync: () -> Unit,
-    onSendTestAlbumArt: () -> Unit
+    onSendTestAlbumArt: () -> Unit,
+    onSendTestWeather: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -71,6 +72,16 @@ fun CommandsTab(
                     enabled = connectedDevicesCount > 0
                 ) {
                     Text("Test Album Art Transfer")
+                }
+                
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                Button(
+                    onClick = onSendTestWeather,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = connectedDevicesCount > 0
+                ) {
+                    Text("Send Weather Data")
                 }
                 
                 if (connectedDevicesCount == 0) {

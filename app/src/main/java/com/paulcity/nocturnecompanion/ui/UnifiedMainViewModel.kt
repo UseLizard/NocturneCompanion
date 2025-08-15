@@ -257,6 +257,22 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
         }
         getApplication<Application>().startService(intent)
     }
+    
+    fun sendTestWeather() {
+        Log.d(TAG, "sendTestWeather() called - sending REQUEST_WEATHER_REFRESH broadcast")
+        val intent = Intent("com.paulcity.nocturnecompanion.REQUEST_WEATHER_REFRESH")
+        intent.setPackage(getApplication<Application>().packageName)
+        
+        // Use LocalBroadcastManager for Android 34+ to match receiver registration
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(getApplication())
+                .sendBroadcast(intent)
+            Log.d(TAG, "REQUEST_WEATHER_REFRESH broadcast sent via LocalBroadcastManager")
+        } else {
+            getApplication<Application>().sendBroadcast(intent)
+            Log.d(TAG, "REQUEST_WEATHER_REFRESH broadcast sent via regular broadcast")
+        }
+    }
 
     fun clearNotifications() {
         notifications.value = emptyList()
@@ -279,9 +295,16 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
                         parameters.append("longitude", longitude.toString())
                         parameters.append("hourly", "temperature_2m,relativehumidity_2m,apparent_temperature,precipitation_probability,weathercode,windspeed_10m")
                         parameters.append("daily", "weathercode,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max")
+                        parameters.append("temperature_unit", "fahrenheit")
+                        parameters.append("windspeed_unit", "mph")
+                        parameters.append("precipitation_unit", "inch")
                     }
                 }.body()
                 weatherResponse.value = response
+                
+                // Send weather update via BLE
+                sendWeatherUpdateToBle(response)
+                
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching weather", e)
             }
@@ -355,6 +378,63 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
             "London" -> fetchWeather(51.51, -0.13)
             "Tokyo" -> fetchWeather(35.69, 139.69)
             "Sydney" -> fetchWeather(-33.87, 151.21)
+        }
+    }
+    
+    /**
+     * Send weather update to nocturned service via BLE
+     */
+    private fun sendWeatherUpdateToBle(weatherResponse: WeatherResponse) {
+        try {
+            val locationName = if (isUsingCurrentLocation.value) {
+                currentLocationName.value ?: "Current Location"
+            } else {
+                selectedCity.value
+            }
+            
+            Log.d(TAG, "Sending weather update to BLE service for location: $locationName")
+            
+            // Send weather data to the BLE service immediately
+            val intent = Intent(getApplication(), com.paulcity.nocturnecompanion.services.NocturneServiceBLE::class.java)
+            intent.action = "SEND_WEATHER_UPDATE"
+            intent.putExtra("weather_data", com.google.gson.Gson().toJson(weatherResponse))
+            intent.putExtra("location_name", locationName)
+            intent.putExtra("is_current_location", isUsingCurrentLocation.value)
+            
+            getApplication<Application>().startService(intent)
+            
+            Log.d(TAG, "Weather update sent to BLE service for immediate transmission to connected devices")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending weather update to BLE", e)
+        }
+    }
+    
+    /**
+     * Refresh weather data for BLE when requested by the service
+     */
+    fun refreshWeatherForBle() {
+        Log.d(TAG, "Refreshing weather data for BLE - isUsingCurrentLocation: ${isUsingCurrentLocation.value}, selectedCity: ${selectedCity.value}")
+        
+        // Send current weather data if available
+        weatherResponse.value?.let { weather ->
+            Log.d(TAG, "Sending existing weather data to BLE")
+            sendWeatherUpdateToBle(weather)
+        } ?: run {
+            Log.d(TAG, "No existing weather data, fetching fresh data")
+            // If no current weather data, fetch fresh data
+            if (isUsingCurrentLocation.value) {
+                currentLocation.value?.let {
+                    Log.d(TAG, "Fetching weather for current location: ${it.latitude}, ${it.longitude}")
+                    fetchWeather(it.latitude, it.longitude)
+                } ?: run {
+                    Log.d(TAG, "No current location available, attempting to get location")
+                    getCurrentLocation()
+                }
+            } else {
+                Log.d(TAG, "Fetching weather for selected city: ${selectedCity.value}")
+                onCitySelected(selectedCity.value)
+            }
         }
     }
 }

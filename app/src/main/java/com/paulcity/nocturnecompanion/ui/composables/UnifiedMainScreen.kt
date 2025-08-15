@@ -77,7 +77,8 @@ fun UnifiedMainScreen(
                 connectedDevicesCount = viewModel.connectedDevices.size,
                 onSendTestState = { viewModel.sendTestState() },
                 onSendTestTimeSync = { viewModel.sendTestTimeSync() },
-                onSendTestAlbumArt = { viewModel.sendTestAlbumArt() }
+                onSendTestAlbumArt = { viewModel.sendTestAlbumArt() },
+                onSendTestWeather = { viewModel.sendTestWeather() }
             )
             6 -> LogsTab(
                 debugLogs = viewModel.debugLogs,
