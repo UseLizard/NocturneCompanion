@@ -25,6 +25,8 @@ import com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager
 import com.paulcity.nocturnecompanion.ble.MediaStoreAlbumArtManager
 import com.paulcity.nocturnecompanion.data.*
 import com.paulcity.nocturnecompanion.services.NocturneServiceBLE
+import com.paulcity.nocturnecompanion.utils.GradientInfo
+import com.paulcity.nocturnecompanion.utils.GradientUtils
 import io.ktor.client.*
 import io.ktor.client.call.*
 import io.ktor.client.engine.android.*
@@ -70,6 +72,10 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
     val currentLocation = mutableStateOf<Location?>(null)
     val currentLocationName = mutableStateOf<String?>(null)
     val isUsingCurrentLocation = mutableStateOf(false)
+
+    // Gradient state
+    val gradientInfo = mutableStateOf<GradientInfo?>(null)
+    val isGeneratingGradient = mutableStateOf(false)
 
     private val bluetoothAdapter: BluetoothAdapter by lazy {
         val bluetoothManager = application.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -434,6 +440,36 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
             } else {
                 Log.d(TAG, "Fetching weather for selected city: ${selectedCity.value}")
                 onCitySelected(selectedCity.value)
+            }
+        }
+    }
+
+    /**
+     * Generate gradient from current album art
+     */
+    fun generateGradientFromAlbumArt() {
+        val bitmap = albumArtInfo.value?.bitmap
+        if (bitmap == null) {
+            Log.w(TAG, "Cannot generate gradient: no album art bitmap available")
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                isGeneratingGradient.value = true
+                Log.d(TAG, "Starting gradient generation from album art")
+                
+                // Extract colors and generate gradient info
+                val generatedGradientInfo = GradientUtils.generateGradientFromBitmap(bitmap, numColors = 6)
+                
+                gradientInfo.value = generatedGradientInfo
+                
+                Log.d(TAG, "Gradient generation completed. Found ${generatedGradientInfo.colors.size} colors")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error generating gradient from album art", e)
+            } finally {
+                isGeneratingGradient.value = false
             }
         }
     }

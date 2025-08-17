@@ -15,6 +15,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.paulcity.nocturnecompanion.ui.UnifiedMainViewModel
 import com.paulcity.nocturnecompanion.ui.tabs.*
+import com.paulcity.nocturnecompanion.ui.components.SidebarNavigation
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -23,8 +24,6 @@ fun UnifiedMainScreen(
     onScanClick: () -> Unit,
     onStartServer: () -> Unit
 ) {
-    val tabTitles = listOf("Status", "Devices", "Connection", "Transfer", "Media", "Commands", "Logs", "Audio", "Podcasts", "Settings", "Weather")
-
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
             title = { Text("Nocturne Companion") }
@@ -36,66 +35,88 @@ fun UnifiedMainScreen(
             connectedDevicesCount = viewModel.connectedDevices.size
         )
 
-        ScrollableTabRow(selectedTabIndex = viewModel.selectedTab.value) {
-            tabTitles.forEachIndexed { index, title ->
-                Tab(
-                    selected = viewModel.selectedTab.value == index,
-                    onClick = { viewModel.selectedTab.value = index },
-                    text = { Text(title) }
+        Row(modifier = Modifier.fillMaxSize()) {
+            // Collapsible Sidebar Navigation
+            SidebarNavigation(
+                selectedTabId = viewModel.selectedTab.value,
+                onTabSelected = { tabId -> viewModel.selectedTab.value = tabId }
+            )
+
+            // Main Content Area
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
+                MainContent(
+                    viewModel = viewModel,
+                    onStartServer = onStartServer
                 )
             }
         }
+    }
+}
 
-        when (viewModel.selectedTab.value) {
-            0 -> StatusTab(
-                serverStatus = viewModel.serverStatus.value,
-                isServerRunning = viewModel.isServerRunning.value,
-                notifications = viewModel.notifications.value,
-                onStartServer = {
-                    if (viewModel.isBluetoothEnabled.value) {
-                        onStartServer()
-                    }
-                },
-                onStopServer = { viewModel.stopNocturneService() },
-                onClearNotifications = { viewModel.clearNotifications() },
-                isBluetoothEnabled = viewModel.isBluetoothEnabled.value
-            )
-            1 -> DevicesTab(
-                connectedDevices = viewModel.connectedDevices,
-                onRequestPhyUpdate = { }
-            )
-            2 -> ConnectionTab(
-                connectedDevices = viewModel.connectedDevices
-            )
-            3 -> ConnectionSettingsTab()
-            4 -> MediaTab(
-                lastStateUpdate = viewModel.lastStateUpdate.value,
-                albumArtInfo = viewModel.albumArtInfo.value
-            )
-            5 -> CommandsTab(
-                lastCommand = viewModel.lastCommand.value,
-                connectedDevicesCount = viewModel.connectedDevices.size,
-                onSendTestState = { viewModel.sendTestState() },
-                onSendTestTimeSync = { viewModel.sendTestTimeSync() },
-                onSendTestAlbumArt = { viewModel.sendTestAlbumArt() },
-                onSendTestWeather = { viewModel.sendTestWeather() }
-            )
-            6 -> LogsTab(
-                debugLogs = viewModel.debugLogs,
-                autoScroll = viewModel.autoScrollLogs.value,
-                logFilter = viewModel.logFilter.value,
-                onAutoScrollToggle = { viewModel.autoScrollLogs.value = it },
-                onFilterChange = { viewModel.logFilter.value = it },
-                onClearLogs = { viewModel.clearLogs() }
-            )
-            7 -> AudioTab(
-                audioEvents = viewModel.audioEvents,
-                onClearEvents = { viewModel.clearAudioEvents() }
-            )
-            8 -> PodcastTab()
-            9 -> SettingsTab()
-            10 -> WeatherTab(viewModel = viewModel)
-        }
+@Composable
+private fun MainContent(
+    viewModel: UnifiedMainViewModel,
+    onStartServer: () -> Unit
+) {
+    when (viewModel.selectedTab.value) {
+        0 -> StatusTab(
+            serverStatus = viewModel.serverStatus.value,
+            isServerRunning = viewModel.isServerRunning.value,
+            notifications = viewModel.notifications.value,
+            onStartServer = {
+                if (viewModel.isBluetoothEnabled.value) {
+                    onStartServer()
+                }
+            },
+            onStopServer = { viewModel.stopNocturneService() },
+            onClearNotifications = { viewModel.clearNotifications() },
+            isBluetoothEnabled = viewModel.isBluetoothEnabled.value
+        )
+        1 -> DevicesTab(
+            connectedDevices = viewModel.connectedDevices,
+            onRequestPhyUpdate = { }
+        )
+        2 -> ConnectionTab(
+            connectedDevices = viewModel.connectedDevices
+        )
+        3 -> ConnectionSettingsTab()
+        4 -> MediaTab(
+            lastStateUpdate = viewModel.lastStateUpdate.value,
+            albumArtInfo = viewModel.albumArtInfo.value
+        )
+        5 -> CommandsTab(
+            lastCommand = viewModel.lastCommand.value,
+            connectedDevicesCount = viewModel.connectedDevices.size,
+            onSendTestState = { viewModel.sendTestState() },
+            onSendTestTimeSync = { viewModel.sendTestTimeSync() },
+            onSendTestAlbumArt = { viewModel.sendTestAlbumArt() },
+            onSendTestWeather = { viewModel.sendTestWeather() }
+        )
+        6 -> LogsTab(
+            debugLogs = viewModel.debugLogs,
+            autoScroll = viewModel.autoScrollLogs.value,
+            logFilter = viewModel.logFilter.value,
+            onAutoScrollToggle = { viewModel.autoScrollLogs.value = it },
+            onFilterChange = { viewModel.logFilter.value = it },
+            onClearLogs = { viewModel.clearLogs() }
+        )
+        7 -> AudioTab(
+            audioEvents = viewModel.audioEvents,
+            onClearEvents = { viewModel.clearAudioEvents() }
+        )
+        8 -> PodcastTab()
+        9 -> GradientTab(
+            albumArtInfo = viewModel.albumArtInfo.value,
+            gradientInfo = viewModel.gradientInfo.value,
+            isGenerating = viewModel.isGeneratingGradient.value,
+            onGenerateGradient = { viewModel.generateGradientFromAlbumArt() }
+        )
+        10 -> SettingsTab()
+        11 -> WeatherTab(viewModel = viewModel)
     }
 }
 
