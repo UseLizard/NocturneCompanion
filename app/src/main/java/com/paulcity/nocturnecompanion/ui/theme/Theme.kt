@@ -44,44 +44,52 @@ val SurfaceVariantDark = Color(0xFF1E293B)
 val OutlineLight = Color(0xFFE2E8F0)
 val OutlineDark = Color(0xFF334155)
 
+// High contrast text colors for better readability
+val HighContrastTextDark = Color(0xFF000000)        // Pure black for light backgrounds
+val HighContrastTextLight = Color(0xFFFFFFFF)       // Pure white for dark backgrounds
+val MediumContrastTextDark = Color(0xFF1F2937)      // Very dark gray for light backgrounds
+val MediumContrastTextLight = Color(0xFFF9FAFB)     // Very light gray for dark backgrounds
+val SubtleTextDark = Color(0xFF374151)              // Dark gray for light backgrounds
+val SubtleTextLight = Color(0xFFE5E7EB)             // Light gray for dark backgrounds
+
 private val DarkColorScheme = darkColorScheme(
     primary = NocturneDark80,
-    onPrimary = Color.White,
+    onPrimary = HighContrastTextLight,
     primaryContainer = NocturnePrimaryVariant,
-    onPrimaryContainer = Color.White,
+    onPrimaryContainer = HighContrastTextLight,
     secondary = NocturneDarkAccent80,
-    onSecondary = Color.Black,
+    onSecondary = HighContrastTextDark,
     tertiary = NocturneTertiary,
-    onTertiary = Color.Black,
+    onTertiary = HighContrastTextDark,
     background = Color(0xFF0F172A),
-    onBackground = Color(0xFFF8FAFC),
+    onBackground = HighContrastTextLight,
     surface = Color(0xFF1E293B),
-    onSurface = Color(0xFFF8FAFC),
+    onSurface = HighContrastTextLight,
     surfaceVariant = SurfaceVariantDark,
-    onSurfaceVariant = Color(0xFFE2E8F0),
+    onSurfaceVariant = MediumContrastTextLight,
     outline = OutlineDark,
     error = ErrorRed,
-    onError = Color.White
+    onError = HighContrastTextLight
 )
 
 private val LightColorScheme = lightColorScheme(
     primary = NocturneLight40,
-    onPrimary = Color.White,
+    onPrimary = HighContrastTextLight,
     primaryContainer = Color(0xFFEEF2FF),
     onPrimaryContainer = NocturneLight40,
     secondary = NocturneLightAccent40,
-    onSecondary = Color.White,
+    onSecondary = HighContrastTextLight,
     tertiary = NocturneTertiary,
-    onTertiary = Color.White,
+    onTertiary = HighContrastTextLight,
     background = Color(0xFFFCFCFD),
-    onBackground = Color(0xFF0F172A),
+    onBackground = HighContrastTextDark,
     surface = Color.White,
-    onSurface = Color(0xFF0F172A),
+    onSurface = HighContrastTextDark,
     surfaceVariant = SurfaceVariantLight,
-    onSurfaceVariant = Color(0xFF334155),
+    onSurfaceVariant = MediumContrastTextDark,
     outline = OutlineLight,
     error = ErrorRed,
-    onError = Color.White
+    onError = HighContrastTextLight
 )
 
 @Composable

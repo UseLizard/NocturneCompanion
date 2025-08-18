@@ -102,7 +102,7 @@ fun ConnectedDeviceCard(
         // Connection indicator
         Surface(
             shape = CircleShape,
-            color = SuccessGreen,
+            color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.size(40.dp)
         ) {
             Box(
@@ -206,7 +206,10 @@ fun ConnectedDeviceCard(
             ) {
                 Icon(Icons.Default.PlayArrow, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Request 2M PHY for Faster Transfer")
+                Text(
+                    "Request 2M PHY for Faster Transfer",
+                    color = MaterialTheme.colorScheme.onSurface
+                )
             }
         }
         

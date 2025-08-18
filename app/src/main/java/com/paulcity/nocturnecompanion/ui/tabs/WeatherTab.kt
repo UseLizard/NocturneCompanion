@@ -61,155 +61,159 @@ fun WeatherTab(viewModel: UnifiedMainViewModel) {
     Column(
         modifier = Modifier.fillMaxSize()
     ) {
-        // Header Controls Card
+        // Unified Control Header
         PrimaryGlassCard(
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                // Location Selector
-                Box {
-                    FilledTonalButton(
-                        onClick = { expanded = true },
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.LocationOn,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (isUsingCurrentLocation && currentLocationName != null) {
-                                currentLocationName!!
-                            } else {
-                                selectedCity
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            Icons.Default.ArrowDropDown,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
+            Column {
+                // Top row: Location and actions
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    // Location Selector
+                    Box(modifier = Modifier.weight(1f)) {
+                        FilledTonalButton(
+                            onClick = { expanded = true },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                Icons.Default.LocationOn,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (isUsingCurrentLocation && currentLocationName != null) {
+                                    currentLocationName!!
+                                } else {
+                                    selectedCity
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Icon(
+                                Icons.Default.ArrowDropDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = expanded,
+                            onDismissRequest = { expanded = false }
+                        ) {
+                            cities.forEach { city ->
+                                DropdownMenuItem(
+                                    text = { Text(city) },
+                                    onClick = {
+                                        selectedCity = city
+                                        expanded = false
+                                        viewModel.onCitySelected(city)
+                                    }
+                                )
+                            }
+                        }
                     }
-                    DropdownMenu(
-                        expanded = expanded,
-                        onDismissRequest = { expanded = false }
+                    
+                    Spacer(modifier = Modifier.width(12.dp))
+                    
+                    // Action Buttons
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        cities.forEach { city ->
-                            DropdownMenuItem(
-                                text = { Text(city) },
-                                onClick = {
-                                    selectedCity = city
-                                    expanded = false
-                                    viewModel.onCitySelected(city)
+                        FilledTonalButton(
+                            onClick = { viewModel.getCurrentLocation() },
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = if (isUsingCurrentLocation) 
+                                    MaterialTheme.colorScheme.primaryContainer 
+                                else 
+                                    MaterialTheme.colorScheme.surfaceVariant
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.LocationOn,
+                                contentDescription = "Use current location",
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        
+                        FilledTonalButton(
+                            onClick = {
+                                if (isUsingCurrentLocation) {
+                                    viewModel.currentLocation.value?.let {
+                                        viewModel.fetchWeather(it.latitude, it.longitude)
+                                    }
+                                } else {
+                                    viewModel.onCitySelected(selectedCity)
                                 }
+                            },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = "Refresh",
+                                modifier = Modifier.size(16.dp)
                             )
                         }
                     }
                 }
                 
-                // Action Buttons
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                // Bottom row: View mode selector
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center
                 ) {
-                    FilledTonalButton(
-                        onClick = { viewModel.getCurrentLocation() },
-                        colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = if (isUsingCurrentLocation) 
-                                MaterialTheme.colorScheme.primaryContainer 
-                            else 
-                                MaterialTheme.colorScheme.surfaceVariant
-                        ),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.LocationOn,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                    
-                    FilledTonalButton(
-                        onClick = {
-                            if (isUsingCurrentLocation) {
-                                viewModel.currentLocation.value?.let {
-                                    viewModel.fetchWeather(it.latitude, it.longitude)
-                                }
-                            } else {
-                                viewModel.onCitySelected(selectedCity)
-                            }
-                        },
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Refresh,
-                            contentDescription = "Refresh",
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        // View Mode Selector
-        SurfaceGlassCard(
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center
-            ) {
-                Box {
-                    FilledTonalButton(
-                        onClick = { viewModeExpanded = true },
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(
-                            if (viewMode == "Hourly") Icons.Default.WbSunny else Icons.Default.Cloud,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            "$viewMode Forecast",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            Icons.Default.ArrowDropDown,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = viewModeExpanded,
-                        onDismissRequest = { viewModeExpanded = false }
-                    ) {
-                        listOf("Hourly", "Daily").forEach { mode ->
-                            DropdownMenuItem(
-                                text = { Text(mode) },
-                                onClick = {
-                                    viewMode = mode
-                                    viewModeExpanded = false
-                                }
+                    Box {
+                        OutlinedButton(
+                            onClick = { viewModeExpanded = true },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(
+                                if (viewMode == "Hourly") Icons.Default.WbSunny else Icons.Default.Cloud,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
                             )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                "$viewMode Forecast",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                Icons.Default.ArrowDropDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = viewModeExpanded,
+                            onDismissRequest = { viewModeExpanded = false }
+                        ) {
+                            listOf("Hourly", "Daily").forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode) },
+                                    onClick = {
+                                        viewMode = mode
+                                        viewModeExpanded = false
+                                    }
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         weatherResponse?.let {
             LazyColumn(
@@ -217,57 +221,80 @@ fun WeatherTab(viewModel: UnifiedMainViewModel) {
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 item {
-                    // Location Info Header
-                    val displayLocation = if (isUsingCurrentLocation && currentLocationName != null) {
-                        currentLocationName!!
-                    } else {
-                        selectedCity
-                    }
+                    // Current Weather Summary
+                    val currentTemp = if (viewMode == "Hourly" && it.hourly.temperature_2m.isNotEmpty()) {
+                        it.hourly.temperature_2m[0].toInt()
+                    } else if (it.daily.temperature_2m_max.isNotEmpty() && it.daily.temperature_2m_min.isNotEmpty()) {
+                        val maxTemp = it.daily.temperature_2m_max[0].toInt()
+                        val minTemp = it.daily.temperature_2m_min[0].toInt()
+                        (maxTemp + minTemp) / 2
+                    } else null
                     
-                    PrimaryGlassCard(
+                    val currentCondition = if (viewMode == "Hourly" && it.hourly.weathercode.isNotEmpty()) {
+                        getWeatherCondition(it.hourly.weathercode[0])
+                    } else if (it.daily.weathercode.isNotEmpty()) {
+                        getWeatherCondition(it.daily.weathercode[0])
+                    } else "Unknown"
+                    
+                    SurfaceGlassCard(
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column {
-                            Text(
-                                text = displayLocation,
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "${String.format("%.2f", it.latitude)}, ${String.format("%.2f", it.longitude)}",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                if (isUsingCurrentLocation) {
-                                    Surface(
-                                        shape = RoundedCornerShape(16.dp),
-                                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    currentTemp?.let { temp ->
+                                        Text(
+                                            text = "${temp}°F",
+                                            style = MaterialTheme.typography.displayMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                    }
+                                    Column {
+                                        Text(
+                                            text = currentCondition,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.Medium,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "${String.format("%.1f", it.latitude)}°, ${String.format("%.1f", it.longitude)}°",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                            
+                            if (isUsingCurrentLocation) {
+                                Surface(
+                                    shape = RoundedCornerShape(20.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Icon(
-                                                Icons.Default.LocationOn,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(14.dp),
-                                                tint = MaterialTheme.colorScheme.primary
-                                            )
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Text(
-                                                "Current Location",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.primary,
-                                                fontWeight = FontWeight.Medium
-                                            )
-                                        }
+                                        Icon(
+                                            Icons.Default.LocationOn,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            "Live Location",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Medium
+                                        )
                                     }
                                 }
                             }
@@ -276,28 +303,6 @@ fun WeatherTab(viewModel: UnifiedMainViewModel) {
                 }
                 
                 if (viewMode == "Hourly") {
-                    item {
-                        SurfaceGlassCard(
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    Icons.Default.WbSunny,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(20.dp),
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Text(
-                                    text = "Today - ${selectedDate.format(DateTimeFormatter.ofPattern("EEEE, MMMM d"))}",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                    }
                     
                     val todayString = selectedDate.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
                     val todayHourlyIndices = it.hourly.time.indices.filter { index ->
@@ -309,7 +314,7 @@ fun WeatherTab(viewModel: UnifiedMainViewModel) {
                         val temp = it.hourly.temperature_2m[index]
                         val weatherCode = it.hourly.weathercode[index]
                         
-                        val tempF = (temp * 9/5) + 32
+                        val tempF = temp
                         val formattedTime = try {
                             val inputFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm", Locale.getDefault())
                             val outputFormat = SimpleDateFormat("h:mm a", Locale.getDefault())
@@ -321,63 +326,45 @@ fun WeatherTab(viewModel: UnifiedMainViewModel) {
                         
                         MinimalGlassCard(
                             modifier = Modifier.fillMaxWidth(),
-                            contentPadding = 16.dp
+                            contentPadding = 14.dp
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Text(
-                                    text = formattedTime,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.Medium,
+                                Column(
                                     modifier = Modifier.weight(1f)
-                                )
-                                Text(
-                                    text = getWeatherCondition(weatherCode),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.weight(1.2f)
-                                )
+                                ) {
+                                    Text(
+                                        text = formattedTime,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = getWeatherCondition(weatherCode),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                
                                 Surface(
-                                    shape = RoundedCornerShape(12.dp),
+                                    shape = RoundedCornerShape(16.dp),
                                     color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
                                 ) {
                                     Text(
                                         text = "${tempF.toInt()}°F",
-                                        style = MaterialTheme.typography.bodyLarge,
+                                        style = MaterialTheme.typography.titleLarge,
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                                     )
                                 }
                             }
                         }
                     }
                 } else {
-                    item {
-                        SurfaceGlassCard(
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    Icons.Default.Cloud,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(20.dp),
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Text(
-                                    text = "7-Day Forecast",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                    }
                     
                     items(7) { dayIndex ->
                         val time = it.daily.time.getOrNull(dayIndex)
@@ -390,9 +377,8 @@ fun WeatherTab(viewModel: UnifiedMainViewModel) {
                             return@items
                         }
                         
-                        val maxTempF = ((maxTemp * 9/5) + 32).toInt()
-                        val minTempF = ((minTemp * 9/5) + 32).toInt()
-                        val avgTempF = (maxTempF + minTempF) / 2
+                        val maxTempF = maxTemp.toInt()
+                        val minTempF = minTemp.toInt()
                         
                         val formattedDate = try {
                             val inputFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
@@ -407,7 +393,7 @@ fun WeatherTab(viewModel: UnifiedMainViewModel) {
                         
                         MinimalGlassCard(
                             modifier = Modifier.fillMaxWidth(),
-                            contentPadding = 16.dp
+                            contentPadding = 14.dp
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -420,9 +406,10 @@ fun WeatherTab(viewModel: UnifiedMainViewModel) {
                                     Text(
                                         text = formattedDate,
                                         style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.SemiBold
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
                                     )
-                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Text(
                                         text = weatherCondition,
                                         style = MaterialTheme.typography.bodySmall,
@@ -430,39 +417,26 @@ fun WeatherTab(viewModel: UnifiedMainViewModel) {
                                     )
                                 }
                                 Row(
-                                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = "${minTempF}°F",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                                    ) {
                                         Text(
-                                            text = "Low",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            text = "${maxTempF}°F",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                                         )
-                                        Text(
-                                            text = "${minTempF}°",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Medium
-                                        )
-                                    }
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text(
-                                            text = "High",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        Surface(
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
-                                        ) {
-                                            Text(
-                                                text = "${maxTempF}°F",
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                            )
-                                        }
                                     }
                                 }
                             }

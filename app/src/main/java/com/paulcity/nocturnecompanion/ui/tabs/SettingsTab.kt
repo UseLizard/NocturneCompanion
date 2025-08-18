@@ -86,7 +86,10 @@ fun SettingsTab(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Status")
+                    Text(
+                        "Status",
+                        color = if (selectedTab == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 
                 Spacer(modifier = Modifier.width(8.dp))
@@ -108,7 +111,10 @@ fun SettingsTab(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Settings")
+                    Text(
+                        "Settings",
+                        color = if (selectedTab == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -231,7 +237,8 @@ private fun SettingsContent(
                     Text(
                         "Notification Listener Access",
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
@@ -265,7 +272,10 @@ private fun SettingsContent(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text("Grant Permission")
+                    Text(
+                        "Grant Permission",
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
                 }
             }
         }
@@ -289,7 +299,8 @@ private fun SettingsContent(
                     Text(
                         "Background Theme",
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
                         "Choose your preferred background style",
@@ -333,7 +344,8 @@ private fun SettingsContent(
                                 Text(
                                     text = getBackgroundThemeDisplayName(theme),
                                     style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
                                     text = getBackgroundThemeDescription(theme),

@@ -1,22 +1,16 @@
 package com.paulcity.nocturnecompanion.ui.tabs
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import com.paulcity.nocturnecompanion.ui.theme.*
 import androidx.compose.ui.text.font.FontFamily
@@ -25,6 +19,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.paulcity.nocturnecompanion.ble.BleConstants
 import com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager
+import com.paulcity.nocturnecompanion.ui.components.PrimaryGlassCard
+import com.paulcity.nocturnecompanion.ui.components.SurfaceGlassCard
 
 @Composable
 fun ConnectionTab(
@@ -66,25 +62,9 @@ fun ConnectionTab(
 
 @Composable
 fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
-    val scale by animateFloatAsState(
-        targetValue = 1.02f,
-        animationSpec = tween(200),
-        label = "connection_card_scale"
-    )
-    
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .scale(scale),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f)
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    PrimaryGlassCard(
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Column(
-            modifier = Modifier.padding(20.dp)
-        ) {
             // Device header
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -95,7 +75,8 @@ fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
                     Text(
                         device.name,
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
                         device.address,
@@ -120,7 +101,8 @@ fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
             Text(
                 "Connection Parameters",
                 style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(modifier = Modifier.height(8.dp))
             
@@ -156,7 +138,8 @@ fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
             Text(
                 "Protocol Support",
                 style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(modifier = Modifier.height(8.dp))
             
@@ -186,7 +169,8 @@ fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
                 Text(
                     "Active Subscriptions",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 
@@ -207,7 +191,8 @@ fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
                             Text(
                                 getCharacteristicName(subscription),
                                 style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                         }
                     }
@@ -219,28 +204,21 @@ fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
             Text(
                 "Service Configuration",
                 style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(modifier = Modifier.height(8.dp))
             
-            Card(
+            SurfaceGlassCard(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)
-                ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                contentPadding = 12.dp,
+                enableScaleAnimation = false
             ) {
-                Column(
-                    modifier = Modifier.padding(12.dp)
-                ) {
-                    ServiceInfo("Service UUID", "6e400001-b5a3-f393-e0a9-e50e24dcca9e")
-                    ServiceInfo("Command RX", "6e400002")
-                    ServiceInfo("Response TX", "6e400003")
-                    ServiceInfo("Album Art TX", "6e400006")
-                }
+                ServiceInfo("Service UUID", "6e400001-b5a3-f393-e0a9-e50e24dcca9e")
+                ServiceInfo("Command RX", "6e400002")
+                ServiceInfo("Response TX", "6e400003")
+                ServiceInfo("Album Art TX", "6e400006")
             }
-        }
     }
 }
 
@@ -272,7 +250,8 @@ fun ConnectionParameter(
             Text(
                 value,
                 style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface
             )
         }
     }
@@ -326,7 +305,8 @@ fun ServiceInfo(label: String, value: String) {
             value,
             style = MaterialTheme.typography.labelSmall,
             fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface
         )
     }
 }

@@ -20,7 +20,8 @@ fun InfoChip(text: String, color: Color = MaterialTheme.colorScheme.secondaryCon
         Text(
             text = text,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.labelSmall
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface
         )
     }
 }
@@ -35,7 +36,8 @@ fun SubscriptionChip(text: String) {
             text = text,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
             style = MaterialTheme.typography.labelSmall,
-            fontSize = 10.sp
+            fontSize = 10.sp,
+            color = MaterialTheme.colorScheme.onSurface
         )
     }
 }

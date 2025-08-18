@@ -64,7 +64,8 @@ fun MediaTab(
             Text(
                 text = "Album Art",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(modifier = Modifier.height(12.dp))
             
@@ -121,7 +122,10 @@ fun MediaTab(
                             color = MaterialTheme.colorScheme.onPrimary
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Generating...")
+                        Text(
+                            "Generating...",
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
                     } else {
                         Icon(
                             Icons.Default.Palette,
@@ -129,7 +133,10 @@ fun MediaTab(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Generate Colors")
+                        Text(
+                            "Generate Colors",
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
                     }
                 }
                 
@@ -145,7 +152,10 @@ fun MediaTab(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Send")
+                        Text(
+                            "Send",
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
                     }
                 }
             }
@@ -159,12 +169,14 @@ fun MediaTab(
                 Text(
                     text = state.track ?: "No track",
                     style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = state.artist ?: "Unknown artist",
-                    style = MaterialTheme.typography.bodyLarge
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
                     text = state.album ?: "Unknown album",
@@ -219,7 +231,7 @@ fun MediaTab(
                 Text(
                     "No media state",
                     style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurface
                 )
             }
         }
@@ -313,7 +325,8 @@ fun MediaTab(
                             Text(
                                 SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(it)),
                                 style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                         }
                     }
@@ -345,7 +358,7 @@ private fun ColorSwatch(extractedColor: ExtractedColor) {
             Text(
                 text = "${extractedColor.count}px",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
@@ -493,7 +506,8 @@ private fun SubtleVariationsCard(
         Text(
             text = title,
             style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Medium
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface
         )
         Spacer(modifier = Modifier.height(8.dp))
         
@@ -554,7 +568,8 @@ private fun AnimatedFlowingGradientCard(
         Text(
             text = title,
             style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Medium
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface
         )
         Spacer(modifier = Modifier.height(8.dp))
         

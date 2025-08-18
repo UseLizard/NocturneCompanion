@@ -1,7 +1,5 @@
 package com.paulcity.nocturnecompanion.ui.tabs
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -12,7 +10,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import com.paulcity.nocturnecompanion.ui.theme.*
 import androidx.compose.ui.text.font.FontFamily
@@ -21,6 +18,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.paulcity.nocturnecompanion.data.AudioEvent
 import com.paulcity.nocturnecompanion.data.AudioEventType
+import com.paulcity.nocturnecompanion.ui.components.PrimaryGlassCard
+import com.paulcity.nocturnecompanion.ui.components.MinimalGlassCard
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -33,26 +32,11 @@ fun AudioTab(
         modifier = Modifier.fillMaxSize()
     ) {
         // Header with clear button
-        val headerScale by animateFloatAsState(
-            targetValue = 1.02f,
-            animationSpec = tween(200),
-            label = "header_card_scale"
-        )
-        
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .scale(headerScale),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f)
-            ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        PrimaryGlassCard(
+            modifier = Modifier.fillMaxWidth()
         ) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(12.dp),
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -60,7 +44,8 @@ fun AudioTab(
                     Text(
                         "Audio Events",
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
                         "${audioEvents.size} events",
@@ -109,31 +94,25 @@ fun AudioTab(
 @Composable
 fun AudioEventCard(event: AudioEvent) {
     val eventColor = when (event.eventType) {
-        AudioEventType.AUDIO_STARTED -> SuccessGreen
-        AudioEventType.AUDIO_STOPPED -> ErrorRed
+        AudioEventType.AUDIO_STARTED -> MaterialTheme.colorScheme.primary
+        AudioEventType.AUDIO_STOPPED -> MaterialTheme.colorScheme.error
         AudioEventType.VOLUME_CHANGED -> MaterialTheme.colorScheme.tertiary
-        AudioEventType.AUDIO_FOCUS_CHANGED -> InfoBlue
-        AudioEventType.MEDIA_SESSION_CREATED -> SuccessGreen
-        AudioEventType.MEDIA_SESSION_DESTROYED -> ErrorRed
+        AudioEventType.AUDIO_FOCUS_CHANGED -> MaterialTheme.colorScheme.secondary
+        AudioEventType.MEDIA_SESSION_CREATED -> MaterialTheme.colorScheme.primary
+        AudioEventType.MEDIA_SESSION_DESTROYED -> MaterialTheme.colorScheme.error
         AudioEventType.METADATA_CHANGED -> MaterialTheme.colorScheme.secondary
-        AudioEventType.PLAYBACK_STATE_CHANGED -> NeutralGrey
-        AudioEventType.PLAYBACK_CONFIG_CHANGED -> NeutralGrey
-        AudioEventType.AUDIO_DEVICE_CONNECTED -> InfoBlue
-        AudioEventType.AUDIO_DEVICE_DISCONNECTED -> WarningOrange
+        AudioEventType.PLAYBACK_STATE_CHANGED -> MaterialTheme.colorScheme.onSurface
+        AudioEventType.PLAYBACK_CONFIG_CHANGED -> MaterialTheme.colorScheme.onSurface
+        AudioEventType.AUDIO_DEVICE_CONNECTED -> MaterialTheme.colorScheme.secondary
+        AudioEventType.AUDIO_DEVICE_DISCONNECTED -> MaterialTheme.colorScheme.tertiary
     }
     
-    Card(
+    MinimalGlassCard(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = eventColor.copy(alpha = 0.1f)
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        enableScaleAnimation = false
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -161,7 +140,8 @@ fun AudioEventCard(event: AudioEvent) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = event.message,
-                    style = MaterialTheme.typography.bodySmall
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
             }
             

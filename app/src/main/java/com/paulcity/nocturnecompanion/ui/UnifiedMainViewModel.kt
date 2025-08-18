@@ -25,6 +25,10 @@ import com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager
 import com.paulcity.nocturnecompanion.ble.MediaStoreAlbumArtManager
 import com.paulcity.nocturnecompanion.data.*
 import com.paulcity.nocturnecompanion.services.NocturneServiceBLE
+import com.paulcity.nocturnecompanion.ui.components.ModernTabItem
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
 import com.paulcity.nocturnecompanion.ui.theme.BackgroundTheme
 import com.paulcity.nocturnecompanion.utils.GradientInfo
 import com.paulcity.nocturnecompanion.utils.GradientUtils
@@ -61,7 +65,7 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
     val notifications = mutableStateOf(listOf<String>())
 
     // UI state
-    val selectedTab = mutableStateOf(0)
+    val selectedTab = mutableStateOf(9)
     val autoScrollLogs = mutableStateOf(true)
     val logFilter = mutableStateOf(BleConstants.DebugLevel.VERBOSE)
     val isBluetoothEnabled = mutableStateOf(false)
@@ -78,6 +82,23 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
     // Gradient state
     val gradientInfo = mutableStateOf<GradientInfo?>(null)
     val isGeneratingGradient = mutableStateOf(false)
+    
+    // Player state
+    val isPlayerExpanded = mutableStateOf(false)
+    val currentPlayingTrack = mutableStateOf<StateUpdate?>(null)
+    val currentAlbumArt = mutableStateOf<String?>(null)
+
+    val tabItems = listOf(
+        ModernTabItem(9, "Home", Icons.Outlined.Home, Icons.Filled.Home),
+        ModernTabItem(1, "Devices", Icons.Outlined.DevicesOther, Icons.Filled.DevicesOther),
+        ModernTabItem(2, "Connection", Icons.Outlined.Link, Icons.Filled.Link),
+        ModernTabItem(3, "Transfer", Icons.Outlined.CloudSync, Icons.Filled.CloudSync),
+        ModernTabItem(4, "Media", Icons.Outlined.PlayArrow, Icons.Filled.PlayArrow),
+        ModernTabItem(7, "Audio", Icons.Outlined.VolumeUp, Icons.Filled.VolumeUp),
+        ModernTabItem(8, "Podcasts", Icons.Outlined.Podcasts, Icons.Filled.Podcasts),
+        ModernTabItem(5, "Commands", Icons.Outlined.Terminal, Icons.Filled.Terminal),
+        ModernTabItem(10, "Weather", Icons.Outlined.Cloud, Icons.Filled.Cloud)
+    )
 
     private val bluetoothAdapter: BluetoothAdapter by lazy {
         val bluetoothManager = application.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -346,8 +367,6 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
                     geocoder.getFromLocation(latitude, longitude, 1) { addresses ->
                         addresses.firstOrNull()?.let { address ->
                             val locationName = when {
-                                !address.locality.isNullOrEmpty() && !address.adminArea.isNullOrEmpty() ->
-                                    "${address.locality}, ${address.adminArea}"
                                 !address.locality.isNullOrEmpty() -> address.locality
                                 !address.adminArea.isNullOrEmpty() -> address.adminArea
                                 !address.countryName.isNullOrEmpty() -> address.countryName
@@ -364,8 +383,6 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
                     val address = addresses?.firstOrNull()
                     val locationName = address?.let {
                         when {
-                            !it.locality.isNullOrEmpty() && !it.adminArea.isNullOrEmpty() ->
-                                "${it.locality}, ${it.adminArea}"
                             !it.locality.isNullOrEmpty() -> it.locality
                             !it.adminArea.isNullOrEmpty() -> it.adminArea
                             !it.countryName.isNullOrEmpty() -> it.countryName
@@ -506,6 +523,61 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
         } catch (e: Exception) {
             Log.e(TAG, "Error sending gradient colors to BLE", e)
         }
+    }
+    
+    // Player control functions
+    fun expandPlayer() {
+        isPlayerExpanded.value = true
+    }
+    
+    fun minimizePlayer() {
+        isPlayerExpanded.value = false
+    }
+    
+    fun togglePlayPause() {
+        val track = currentPlayingTrack.value ?: return
+        val command = if (track.is_playing) "pause" else "play"
+        sendMediaCommand(command)
+    }
+    
+    fun playPrevious() {
+        sendMediaCommand("previous")
+    }
+    
+    fun playNext() {
+        sendMediaCommand("next")
+    }
+    
+    fun seekTo(position: Float) {
+        val track = currentPlayingTrack.value ?: return
+        val seekPositionMs = (position * track.duration_ms).toLong()
+        sendMediaCommand("seek", seekPositionMs)
+    }
+    
+    private fun sendMediaCommand(command: String, valueMs: Long? = null) {
+        try {
+            val intent = Intent(getApplication(), NocturneServiceBLE::class.java).apply {
+                action = "SEND_MEDIA_COMMAND"
+                putExtra("command", command)
+                valueMs?.let { putExtra("value_ms", it) }
+            }
+            getApplication<Application>().startService(intent)
+            Log.d(TAG, "Sent media command: $command")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending media command: $command", e)
+        }
+    }
+    
+    fun updateCurrentTrack(stateUpdate: StateUpdate) {
+        currentPlayingTrack.value = stateUpdate
+        // Update album art if track changed
+        if (lastStateUpdate.value?.track != stateUpdate.track || 
+            lastStateUpdate.value?.artist != stateUpdate.artist) {
+            // Trigger album art update if available
+            // Note: getAlbumArt function would need to be implemented
+            Log.d(TAG, "Track changed, would update album art for: ${stateUpdate.artist} - ${stateUpdate.track}")
+        }
+        lastStateUpdate.value = stateUpdate
     }
 }
 

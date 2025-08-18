@@ -83,7 +83,8 @@ fun ConnectionSettingsTab() {
                 Text(
                     "Image Format",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -133,7 +134,8 @@ fun ConnectionSettingsTab() {
                 Text(
                     "Compression & Size",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -142,7 +144,8 @@ fun ConnectionSettingsTab() {
                 if (imageFormat != "PNG") {
                     Text(
                         "Compression Quality: $compressionQuality%",
-                        style = MaterialTheme.typography.bodyMedium
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     
                     Slider(
@@ -159,7 +162,8 @@ fun ConnectionSettingsTab() {
                 // Image Size
                 Text(
                     "Image Size: ${imageSize}x${imageSize}px",
-                    style = MaterialTheme.typography.bodyMedium
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 
                 Slider(
@@ -194,7 +198,8 @@ fun ConnectionSettingsTab() {
                 Text(
                     "Transfer Settings",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -207,7 +212,8 @@ fun ConnectionSettingsTab() {
                 ) {
                     Text(
                         "Use Binary Protocol",
-                        style = MaterialTheme.typography.bodyMedium
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     
                     Switch(
@@ -230,7 +236,8 @@ fun ConnectionSettingsTab() {
                 // Chunk Size
                 Text(
                     "Chunk Size: $chunkSize bytes",
-                    style = MaterialTheme.typography.bodyMedium
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 
                 Slider(
@@ -245,7 +252,8 @@ fun ConnectionSettingsTab() {
                 // Chunk Delay
                 Text(
                     "Chunk Delay: $chunkDelayMs ms",
-                    style = MaterialTheme.typography.bodyMedium
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 
                 Slider(
@@ -295,7 +303,7 @@ fun ConnectionSettingsTab() {
             ) {
                 Icon(Icons.Default.Refresh, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Reset Defaults")
+                Text("Reset Defaults", color = MaterialTheme.colorScheme.onPrimary)
             }
             
             Button(
@@ -310,7 +318,7 @@ fun ConnectionSettingsTab() {
             ) {
                 Icon(Icons.Default.PlayArrow, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Test Transfer")
+                Text("Test Transfer", color = MaterialTheme.colorScheme.onPrimary)
             }
         }
         

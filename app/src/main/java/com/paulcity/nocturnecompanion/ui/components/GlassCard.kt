@@ -45,12 +45,12 @@ fun GlassCard(
         shape = RoundedCornerShape(cornerRadius),
         colors = CardDefaults.cardColors(
             containerColor = when (glassType) {
-                GlassType.Primary -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f)
-                GlassType.Surface -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)
-                GlassType.Secondary -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.12f)
-                GlassType.Tertiary -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.12f)
+                GlassType.Primary -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                GlassType.Surface -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                GlassType.Secondary -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.25f)
+                GlassType.Tertiary -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.25f)
                 GlassType.Error -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.12f)
-                GlassType.Success -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.1f)
+                GlassType.Success -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
                 GlassType.Minimal -> MaterialTheme.colorScheme.surface.copy(alpha = 0.08f)
                 is GlassType.Custom -> glassType.color.copy(alpha = glassType.alpha)
             }

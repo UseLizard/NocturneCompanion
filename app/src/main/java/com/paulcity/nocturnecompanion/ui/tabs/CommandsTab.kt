@@ -89,7 +89,7 @@ fun CommandsTab(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Commands")
+                    Text("Commands", color = MaterialTheme.colorScheme.onSurface)
                 }
                 
                 Spacer(modifier = Modifier.width(8.dp))
@@ -180,7 +180,7 @@ private fun CommandsContent(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Send Test State Update")
+                    Text("Send Test State Update", color = MaterialTheme.colorScheme.onPrimary)
                 }
                 
                 Button(
@@ -195,7 +195,7 @@ private fun CommandsContent(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Send Time Sync")
+                    Text("Send Time Sync", color = MaterialTheme.colorScheme.onPrimary)
                 }
                 
                 Button(
@@ -210,7 +210,7 @@ private fun CommandsContent(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Test Album Art Transfer")
+                    Text("Test Album Art Transfer", color = MaterialTheme.colorScheme.onPrimary)
                 }
                 
                 Button(
@@ -225,7 +225,7 @@ private fun CommandsContent(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Send Weather Data")
+                    Text("Send Weather Data", color = MaterialTheme.colorScheme.onPrimary)
                 }
             }
             
@@ -268,7 +268,7 @@ private fun CommandsContent(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 10.sp
                         ),
-                        color = SuccessGreen
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
             } else {
@@ -318,7 +318,7 @@ private fun LogsContent(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("${logFilter.name}")
+                        Text("${logFilter.name}", color = MaterialTheme.colorScheme.onSurface)
                     }
                     DropdownMenu(
                         expanded = expanded,
@@ -410,7 +410,7 @@ private fun LogsContent(
                                     Icons.Default.Article,
                                     contentDescription = null,
                                     modifier = Modifier.size(48.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Text(
@@ -509,14 +509,15 @@ private fun LogEntry(log: DebugLogger.DebugLogEntry) {
                     log.data.forEach { (key, value) ->
                         Surface(
                             shape = RoundedCornerShape(4.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         ) {
                             Text(
                                 text = "$key: $value",
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                                 style = MaterialTheme.typography.labelSmall,
                                 fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                         }
                     }

@@ -19,3 +19,14 @@ data class PodcastCollection(
     val podcasts: List<Podcast>,
     val importedAt: Long = System.currentTimeMillis()
 )
+
+@Serializable
+data class PodcastEpisode(
+    val title: String,
+    val description: String? = null,
+    val audioUrl: String? = null,
+    val publishDate: String? = null,
+    val duration: String? = null,
+    val imageUrl: String? = null,
+    val guid: String? = null
+)
