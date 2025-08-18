@@ -25,6 +25,7 @@ import com.paulcity.nocturnecompanion.ble.EnhancedBleServerManager
 import com.paulcity.nocturnecompanion.ble.MediaStoreAlbumArtManager
 import com.paulcity.nocturnecompanion.data.*
 import com.paulcity.nocturnecompanion.services.NocturneServiceBLE
+import com.paulcity.nocturnecompanion.ui.theme.BackgroundTheme
 import com.paulcity.nocturnecompanion.utils.GradientInfo
 import com.paulcity.nocturnecompanion.utils.GradientUtils
 import io.ktor.client.*
@@ -64,6 +65,7 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
     val autoScrollLogs = mutableStateOf(true)
     val logFilter = mutableStateOf(BleConstants.DebugLevel.VERBOSE)
     val isBluetoothEnabled = mutableStateOf(false)
+    val backgroundTheme = mutableStateOf(BackgroundTheme.GRADIENT)
 
     // Weather state
     val weatherResponse = mutableStateOf<WeatherResponse?>(null)
@@ -105,6 +107,10 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
     fun onServerStatusUpdate(status: String, isRunning: Boolean) {
         serverStatus.value = status
         isServerRunning.value = isRunning
+    }
+
+    fun updateBackgroundTheme(theme: BackgroundTheme) {
+        backgroundTheme.value = theme
     }
 
     fun onConnectedDevicesUpdate(devicesJson: String?) {
@@ -471,6 +477,34 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
             } finally {
                 isGeneratingGradient.value = false
             }
+        }
+    }
+
+    /**
+     * Send gradient colors to Car Thing via BLE
+     */
+    fun sendGradientColors() {
+        val currentGradientInfo = gradientInfo.value
+        if (currentGradientInfo == null) {
+            Log.w(TAG, "Cannot send gradient colors: no gradient info available")
+            return
+        }
+
+        Log.d(TAG, "Sending gradient colors to Car Thing via BLE")
+        
+        try {
+            val intent = Intent(getApplication(), NocturneServiceBLE::class.java).apply {
+                action = "SEND_GRADIENT_COLORS"
+                // Convert ExtractedColor list to Int list for transmission
+                val colorInts = currentGradientInfo.colors.map { it.color }
+                putIntegerArrayListExtra("gradient_colors", ArrayList(colorInts))
+            }
+            getApplication<Application>().startService(intent)
+            
+            Log.d(TAG, "Gradient colors sent: ${currentGradientInfo.colors.size} colors")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending gradient colors to BLE", e)
         }
     }
 }

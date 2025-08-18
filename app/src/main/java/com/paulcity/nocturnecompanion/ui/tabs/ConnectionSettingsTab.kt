@@ -18,6 +18,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.paulcity.nocturnecompanion.services.NocturneServiceBLE
+import com.paulcity.nocturnecompanion.ui.components.PrimaryGlassCard
+import com.paulcity.nocturnecompanion.ui.components.SurfaceGlassCard
 import kotlinx.coroutines.launch
 
 @Composable
@@ -72,17 +74,12 @@ fun ConnectionSettingsTab() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp)
             .verticalScroll(rememberScrollState())
     ) {
         // Image Format Selection
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        PrimaryGlassCard(
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Column(
-                modifier = Modifier.padding(16.dp)
-            ) {
                 Text(
                     "Image Format",
                     style = MaterialTheme.typography.titleMedium,
@@ -126,18 +123,13 @@ fun ConnectionSettingsTab() {
                     )
                 }
             }
-        }
         
         Spacer(modifier = Modifier.height(16.dp))
         
         // Compression Settings
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        PrimaryGlassCard(
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Column(
-                modifier = Modifier.padding(16.dp)
-            ) {
                 Text(
                     "Compression & Size",
                     style = MaterialTheme.typography.titleMedium,
@@ -192,18 +184,13 @@ fun ConnectionSettingsTab() {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-        }
         
         Spacer(modifier = Modifier.height(16.dp))
         
         // Transfer Settings
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        PrimaryGlassCard(
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Column(
-                modifier = Modifier.padding(16.dp)
-            ) {
                 Text(
                     "Transfer Settings",
                     style = MaterialTheme.typography.titleMedium,
@@ -285,7 +272,6 @@ fun ConnectionSettingsTab() {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-        }
         
         Spacer(modifier = Modifier.height(16.dp))
         
@@ -331,11 +317,8 @@ fun ConnectionSettingsTab() {
         Spacer(modifier = Modifier.height(16.dp))
         
         // Info Card
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer
-            )
+        SurfaceGlassCard(
+            modifier = Modifier.fillMaxWidth()
         ) {
             Row(
                 modifier = Modifier.padding(12.dp),
@@ -345,14 +328,14 @@ fun ConnectionSettingsTab() {
                     Icons.Default.Info,
                     contentDescription = null,
                     modifier = Modifier.size(20.dp),
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                    tint = MaterialTheme.colorScheme.primary
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Column {
                     Text(
                         "Tips for Best Performance",
                         style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
@@ -361,7 +344,7 @@ fun ConnectionSettingsTab() {
                         "• Lower quality to 70-80% for faster transfers\n" +
                         "• Enable binary protocol for 2x speed",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }

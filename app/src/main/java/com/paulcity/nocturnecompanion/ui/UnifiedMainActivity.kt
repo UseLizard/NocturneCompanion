@@ -49,10 +49,11 @@ class UnifiedMainActivity : ComponentActivity() {
         registerBroadcastReceivers()
 
         setContent {
-            NocturneCompanionTheme {
+            NocturneCompanionTheme(
+                backgroundTheme = viewModel.backgroundTheme.value
+            ) {
                 UnifiedMainScreen(
                     viewModel = viewModel,
-                    onScanClick = { checkPermissionsAndScan() },
                     onStartServer = { requestPermissionsAndStart() }
                 )
             }

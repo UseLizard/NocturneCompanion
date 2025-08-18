@@ -1,18 +1,22 @@
 package com.paulcity.nocturnecompanion.ui.tabs
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import com.paulcity.nocturnecompanion.ui.theme.*
 import androidx.compose.ui.text.font.FontFamily
@@ -28,9 +32,7 @@ fun ConnectionTab(
 ) {
     if (connectedDevices.isEmpty()) {
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(32.dp),
+            modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
             Column(
@@ -40,21 +42,19 @@ fun ConnectionTab(
                     Icons.Default.Close,
                     contentDescription = "No devices",
                     modifier = Modifier.size(64.dp),
-                    tint = Color.Gray
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     "No devices connected",
                     style = MaterialTheme.typography.bodyLarge,
-                    color = Color.Gray
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
     } else {
         LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(16.dp),
+            modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             items(connectedDevices) { device ->
@@ -66,12 +66,24 @@ fun ConnectionTab(
 
 @Composable
 fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
+    val scale by animateFloatAsState(
+        targetValue = 1.02f,
+        animationSpec = tween(200),
+        label = "connection_card_scale"
+    )
+    
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        modifier = Modifier
+            .fillMaxWidth()
+            .scale(scale),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f)
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(
-            modifier = Modifier.padding(16.dp)
+            modifier = Modifier.padding(20.dp)
         ) {
             // Device header
             Row(
@@ -95,7 +107,7 @@ fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
                 Icon(
                     Icons.Default.Check,
                     contentDescription = "Connected",
-                    tint = infoColor(),
+                    tint = InfoBlue,
                     modifier = Modifier.size(24.dp)
                 )
             }
@@ -154,19 +166,16 @@ fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
             ) {
                 StatusChip(
                     label = "Binary Protocol",
-                    enabled = device.supportsBinaryProtocol,
-                    color = if (device.supportsBinaryProtocol) successColor() else errorColor()
+                    color = if (device.supportsBinaryProtocol) SuccessGreen else ErrorRed
                 )
                 StatusChip(
                     label = "2M PHY",
-                    enabled = device.supports2MPHY,
-                    color = if (device.supports2MPHY) successColor() else neutralColor()
+                    color = if (device.supports2MPHY) SuccessGreen else NeutralGrey
                 )
                 if (device.requestHighPriority) {
                     StatusChip(
                         label = "High Priority",
-                        enabled = true,
-                        color = warningColor()
+                        color = WarningOrange
                     )
                 }
             }
@@ -192,7 +201,7 @@ fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
                                 Icons.Default.Notifications,
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp),
-                                tint = infoColor()
+                                tint = InfoBlue
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
@@ -216,9 +225,11 @@ fun ConnectionCard(device: EnhancedBleServerManager.DeviceInfo) {
             
             Card(
                 modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)
+                ),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
             ) {
                 Column(
                     modifier = Modifier.padding(12.dp)
@@ -270,7 +281,6 @@ fun ConnectionParameter(
 @Composable
 fun StatusChip(
     label: String,
-    enabled: Boolean,
     color: Color
 ) {
     Surface(

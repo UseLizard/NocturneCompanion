@@ -70,6 +70,10 @@ object BinaryProtocolV2 {
     const val MSG_ERROR_COMMAND_FAILED: Short = 0x0402
     const val MSG_ERROR_INVALID_MESSAGE: Short = 0x0403
     
+    // Gradient messages - must fit in 12 bits (0x000-0xFFF)
+    // Using 0x06xx range for gradients
+    const val MSG_GRADIENT_COLORS: Short = 0x0601
+    
     /**
      * Enhanced binary message header (16 bytes):
      * [0-1]   Protocol version + Message Type (version in high 4 bits, type in lower 12 bits)
@@ -616,6 +620,46 @@ object BinaryProtocolV2 {
     )
     
     /**
+     * Gradient colors payload
+     * Format: [count:1][r1:1][g1:1][b1:1][r2:1][g2:1][b2:1]...
+     */
+    fun createGradientColorsPayload(colors: List<Int>): ByteArray {
+        val colorCount = colors.size.coerceAtMost(255) // Limit to 255 colors
+        
+        return ByteBuffer.allocate(1 + colorCount * 3).apply {
+            order(ByteOrder.BIG_ENDIAN)
+            put(colorCount.toByte())
+            
+            colors.take(colorCount).forEach { color ->
+                put(((color shr 16) and 0xFF).toByte()) // Red
+                put(((color shr 8) and 0xFF).toByte())  // Green
+                put((color and 0xFF).toByte())          // Blue
+            }
+        }.array()
+    }
+    
+    fun parseGradientColorsPayload(data: ByteArray): List<Int>? {
+        if (data.isEmpty()) return null
+        
+        val buffer = ByteBuffer.wrap(data).apply {
+            order(ByteOrder.BIG_ENDIAN)
+        }
+        
+        val colorCount = buffer.get().toInt() and 0xFF
+        if (data.size < 1 + colorCount * 3) return null
+        
+        val colors = mutableListOf<Int>()
+        repeat(colorCount) {
+            val r = buffer.get().toInt() and 0xFF
+            val g = buffer.get().toInt() and 0xFF
+            val b = buffer.get().toInt() and 0xFF
+            colors.add((0xFF shl 24) or (r shl 16) or (g shl 8) or b)
+        }
+        
+        return colors
+    }
+    
+    /**
      * Get human-readable string for message type
      */
     fun getMessageTypeString(msgType: Short): String {
@@ -656,6 +700,9 @@ object BinaryProtocolV2 {
             
             // Error messages
             MSG_ERROR -> "Error"
+            
+            // Gradient messages
+            MSG_GRADIENT_COLORS -> "GradientColors"
             
             else -> "Unknown(0x${msgType.toString(16)})"
         }

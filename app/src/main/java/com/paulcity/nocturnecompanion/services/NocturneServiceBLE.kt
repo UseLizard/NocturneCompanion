@@ -380,6 +380,19 @@ class NocturneServiceBLE : Service() {
                         Log.w(TAG, "Missing weather data or location name in SEND_WEATHER_UPDATE intent")
                     }
                 }
+                "SEND_GRADIENT_COLORS" -> {
+                    val gradientColors = intent.getIntegerArrayListExtra("gradient_colors")
+                    if (gradientColors != null && ::bleServerManager.isInitialized) {
+                        try {
+                            Log.d(TAG, "Sending gradient colors via BLE: ${gradientColors.size} colors")
+                            sendGradientColors(gradientColors)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error sending gradient colors", e)
+                        }
+                    } else {
+                        Log.w(TAG, "Cannot send gradient colors: no colors provided or BLE server not initialized")
+                    }
+                }
                 else -> {
                     Log.w(TAG, "Unknown action: ${intent?.action}")
                 }
@@ -1139,6 +1152,30 @@ class NocturneServiceBLE : Service() {
                 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send time sync", e)
+            }
+        }
+    }
+    
+    /**
+     * Send gradient colors via BLE
+     */
+    private fun sendGradientColors(colors: List<Int>) {
+        serviceScope.launch {
+            try {
+                // Create binary gradient colors message
+                val gradientPayload = BinaryProtocolV2.createGradientColorsPayload(colors)
+                val gradientMessage = BinaryProtocolV2.createMessage(
+                    BinaryProtocolV2.MSG_GRADIENT_COLORS,
+                    gradientPayload
+                )
+                
+                // Send with normal priority
+                bleServerManager.sendBinaryMessage(gradientMessage, com.paulcity.nocturnecompanion.ble.MessageQueue.Priority.NORMAL)
+                
+                Log.d(TAG, "Gradient colors sent via BLE: ${colors.size} colors")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send gradient colors", e)
             }
         }
     }

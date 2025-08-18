@@ -30,6 +30,9 @@ import com.paulcity.nocturnecompanion.utils.PodcastStorageManager
 import com.paulcity.nocturnecompanion.ui.components.MusicNote
 import com.paulcity.nocturnecompanion.ui.components.Link
 import com.paulcity.nocturnecompanion.ui.components.Description
+import com.paulcity.nocturnecompanion.ui.components.GlassCard
+import com.paulcity.nocturnecompanion.ui.components.GlassType
+import com.paulcity.nocturnecompanion.ui.components.MinimalGlassCard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -91,9 +94,7 @@ fun PodcastTab() {
     }
     
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp)
+        modifier = Modifier.fillMaxSize()
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -140,13 +141,11 @@ fun PodcastTab() {
         }
         
         if (showError) {
-            Card(
+            GlassCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 8.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.1f)
-                )
+                glassType = GlassType.Error
             ) {
                 Row(
                     modifier = Modifier
@@ -279,19 +278,12 @@ fun PodcastTab() {
 fun PodcastItem(podcast: Podcast) {
     var expanded by remember { mutableStateOf(false) }
     
-    Card(
+    MinimalGlassCard(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { expanded = !expanded },
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        )
+        contentPadding = 12.dp
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp)
-        ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.Top
@@ -369,5 +361,4 @@ fun PodcastItem(podcast: Podcast) {
                 )
             }
         }
-    }
 }
