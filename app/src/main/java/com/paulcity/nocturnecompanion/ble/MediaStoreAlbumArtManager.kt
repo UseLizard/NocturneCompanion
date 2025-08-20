@@ -91,7 +91,7 @@ class MediaStoreAlbumArtManager(private val context: Context) {
         // First try the original method (from MediaMetadata bitmap)
         albumArtManager.extractAlbumArt(metadata)?.let { result ->
             Log.d(TAG, "Got album art from MediaMetadata bitmap")
-            return result
+            return Pair(result.data, result.checksum)
         }
         
         // Fall back to MediaStore

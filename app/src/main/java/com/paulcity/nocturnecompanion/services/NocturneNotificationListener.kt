@@ -57,12 +57,22 @@ class NocturneNotificationListener : NotificationListenerService() {
             ).firstOrNull()
 
             val currentController = _activeMediaController.value
-            if (bestController?.packageName != currentController?.packageName || (bestController != null && currentController == null)) {
+            val sessionChanged = bestController?.packageName != currentController?.packageName || 
+                               (bestController != null && currentController == null) ||
+                               (bestController == null && currentController != null)
+            
+            if (sessionChanged) {
                 Log.d(TAG, "Active session changed to: ${bestController?.packageName}")
                 _activeMediaController.value = bestController
-            } else if (bestController == null && currentController != null) {
-                Log.d(TAG, "No active media sessions, clearing controller.")
-                _activeMediaController.value = null
+                
+                // Trigger album art refresh when media session changes
+                if (bestController != null) {
+                    // Send broadcast to trigger album art reload with retry mechanism
+                    val intent = android.content.Intent("com.paulcity.nocturnecompanion.MEDIA_SESSION_CHANGED")
+                    intent.setPackage(packageName)
+                    sendBroadcast(intent)
+                    Log.d(TAG, "🎨 Sent MEDIA_SESSION_CHANGED broadcast to trigger album art refresh")
+                }
             } else {
                 Log.d(TAG, "Keeping existing session: ${currentController?.packageName}")
             }

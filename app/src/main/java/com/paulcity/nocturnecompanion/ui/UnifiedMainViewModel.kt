@@ -39,6 +39,8 @@ import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 
 @SuppressLint("MissingPermission")
@@ -162,8 +164,19 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
 
     fun onStateUpdated(stateJson: String?) {
         stateJson?.let {
-            lastStateUpdate.value = gson.fromJson(it, StateUpdate::class.java)
-            tryGetAlbumArt()
+            val newStateUpdate = gson.fromJson(it, StateUpdate::class.java)
+            val previousState = lastStateUpdate.value
+            lastStateUpdate.value = newStateUpdate
+            
+            // Check if track changed or if we don't have album art for current track
+            val trackChanged = previousState?.track != newStateUpdate.track || 
+                             previousState?.artist != newStateUpdate.artist
+            val noCurrentAlbumArt = albumArtInfo.value?.bitmap == null
+            
+            if (trackChanged || noCurrentAlbumArt) {
+                Log.d(TAG, "State updated - trackChanged: $trackChanged, noCurrentAlbumArt: $noCurrentAlbumArt")
+                tryGetAlbumArt()
+            }
         }
     }
 
@@ -207,38 +220,134 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
         )
     }
 
-    fun tryGetAlbumArt() {
+    // Exponential backoff retry state
+    private var albumArtRetryJob: Job? = null
+    private var currentRetryAttempt = 0
+    private val maxRetryAttempts = 8 // Will retry up to ~1.2 seconds total
+    private val initialRetryDelayMs = 5L
+    
+    fun tryGetAlbumArt(isRetry: Boolean = false) {
+        // Cancel any existing retry job
+        if (!isRetry) {
+            albumArtRetryJob?.cancel()
+            currentRetryAttempt = 0
+        }
+        
         viewModelScope.launch {
             try {
+                // Clear previous album art to ensure only current track art is shown (only on first attempt)
+                if (!isRetry) {
+                    albumArtInfo.value = albumArtInfo.value?.copy(bitmap = null)
+                    MediaTabBitmapHolder.clearBitmap()
+                }
+                
                 val mediaSessionManager = getApplication<Application>().getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
                 val component = ComponentName(getApplication(), com.paulcity.nocturnecompanion.services.NocturneNotificationListener::class.java)
                 val sessions = mediaSessionManager.getActiveSessions(component)
 
-                for (controller in sessions) {
+                // Get the currently playing session only
+                val activeController = sessions.find { it.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING }
+                    ?: sessions.firstOrNull()
+
+                activeController?.let { controller ->
                     val metadata = controller.metadata
                     if (metadata != null) {
+                        val currentTrack = metadata.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
+                        val currentArtist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
+                        val currentAlbum = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+                        
+                        // Only proceed if this matches our current state update (current playing track)
+                        val stateUpdate = lastStateUpdate.value
+                        if (stateUpdate != null && 
+                            (currentTrack != stateUpdate.track || currentArtist != stateUpdate.artist)) {
+                            Log.d(TAG, "Skipping album art for non-current track: $currentArtist - $currentTrack")
+                            return@launch
+                        }
+
                         var art = metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
                             ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)
 
                         if (art == null) {
-                            val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
-                            val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
-                            val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
-                            art = mediaStoreAlbumArtManager.getAlbumArtBitmap(artist, album, title)
+                            art = mediaStoreAlbumArtManager.getAlbumArtBitmap(currentArtist, currentAlbum, currentTrack)
                         }
 
                         if (art != null) {
-                            albumArtInfo.value = albumArtInfo.value?.copy(bitmap = art) ?: AlbumArtInfo(
+                            albumArtInfo.value = AlbumArtInfo(
                                 hasArt = true,
                                 bitmap = art
                             )
-                            Log.d(TAG, "Album art loaded successfully")
-                            break
+                            Log.d(TAG, "Current playing track album art loaded: $currentArtist - $currentTrack (attempt ${currentRetryAttempt + 1})")
+                            
+                            // Store only current track album art with track info
+                            MediaTabBitmapHolder.storeBitmap(art, currentArtist, currentTrack)
+                            
+                            val intent = Intent("com.paulcity.nocturnecompanion.ALBUM_ART_AVAILABLE")
+                            intent.putExtra("artist", currentArtist)
+                            intent.putExtra("album", currentAlbum)
+                            intent.putExtra("title", currentTrack)
+                            getApplication<Application>().sendBroadcast(intent)
+                            Log.d(TAG, "🎨 Sent ALBUM_ART_AVAILABLE broadcast for current track: $currentArtist - $currentAlbum")
+                            
+                            // Success - cancel any pending retries
+                            albumArtRetryJob?.cancel()
+                            currentRetryAttempt = 0
+                        } else {
+                            Log.d(TAG, "No album art available for current track: $currentArtist - $currentTrack (attempt ${currentRetryAttempt + 1})")
+                            
+                            // Retry with exponential backoff if we haven't exceeded max attempts
+                            if (currentRetryAttempt < maxRetryAttempts) {
+                                val delayMs = initialRetryDelayMs * (1L shl currentRetryAttempt) // 2^attempt * 5ms
+                                currentRetryAttempt++
+                                
+                                Log.d(TAG, "Retrying album art load in ${delayMs}ms (attempt $currentRetryAttempt/$maxRetryAttempts)")
+                                
+                                albumArtRetryJob = viewModelScope.launch {
+                                    delay(delayMs)
+                                    tryGetAlbumArt(isRetry = true)
+                                }
+                            } else {
+                                Log.w(TAG, "Max retry attempts reached for album art load: $currentArtist - $currentTrack")
+                                currentRetryAttempt = 0
+                            }
+                        }
+                    } else {
+                        Log.d(TAG, "No metadata available (attempt ${currentRetryAttempt + 1})")
+                        
+                        // Retry with exponential backoff for missing metadata too
+                        if (currentRetryAttempt < maxRetryAttempts) {
+                            val delayMs = initialRetryDelayMs * (1L shl currentRetryAttempt)
+                            currentRetryAttempt++
+                            
+                            Log.d(TAG, "Retrying metadata fetch in ${delayMs}ms (attempt $currentRetryAttempt/$maxRetryAttempts)")
+                            
+                            albumArtRetryJob = viewModelScope.launch {
+                                delay(delayMs)
+                                tryGetAlbumArt(isRetry = true)
+                            }
+                        } else {
+                            Log.w(TAG, "Max retry attempts reached for metadata fetch")
+                            currentRetryAttempt = 0
                         }
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error getting album art", e)
+                Log.e(TAG, "Error getting album art (attempt ${currentRetryAttempt + 1})", e)
+                
+                // Retry on exceptions too
+                if (currentRetryAttempt < maxRetryAttempts) {
+                    val delayMs = initialRetryDelayMs * (1L shl currentRetryAttempt)
+                    currentRetryAttempt++
+                    
+                    Log.d(TAG, "Retrying after exception in ${delayMs}ms (attempt $currentRetryAttempt/$maxRetryAttempts)")
+                    
+                    albumArtRetryJob = viewModelScope.launch {
+                        delay(delayMs)
+                        tryGetAlbumArt(isRetry = true)
+                    }
+                } else {
+                    Log.e(TAG, "Max retry attempts reached after exception")
+                    currentRetryAttempt = 0
+                }
             }
         }
     }
@@ -570,14 +679,44 @@ class UnifiedMainViewModel(application: Application) : AndroidViewModel(applicat
     
     fun updateCurrentTrack(stateUpdate: StateUpdate) {
         currentPlayingTrack.value = stateUpdate
-        // Update album art if track changed
+        
+        // Clear album art if track changed to ensure only current track art is shown
         if (lastStateUpdate.value?.track != stateUpdate.track || 
             lastStateUpdate.value?.artist != stateUpdate.artist) {
-            // Trigger album art update if available
-            // Note: getAlbumArt function would need to be implemented
-            Log.d(TAG, "Track changed, would update album art for: ${stateUpdate.artist} - ${stateUpdate.track}")
+            
+            Log.d(TAG, "Track changed, clearing previous album art for: ${stateUpdate.artist} - ${stateUpdate.track}")
+            
+            // Clear previous album art immediately
+            albumArtInfo.value = albumArtInfo.value?.copy(bitmap = null)
+            MediaTabBitmapHolder.clearBitmap()
+            
+            // Trigger album art update for new track with retry mechanism
+            tryGetAlbumArt()
         }
+        
         lastStateUpdate.value = stateUpdate
+    }
+    
+    /**
+     * Manual refresh function for album art that can be called from UI
+     */
+    fun refreshAlbumArt() {
+        Log.d(TAG, "Manual album art refresh requested")
+        albumArtRetryJob?.cancel()
+        currentRetryAttempt = 0
+        tryGetAlbumArt()
+    }
+    
+    /**
+     * Force album art reload (cancels retries and starts fresh)
+     */
+    fun forceAlbumArtReload() {
+        Log.d(TAG, "Force album art reload requested")
+        albumArtRetryJob?.cancel()
+        currentRetryAttempt = 0
+        albumArtInfo.value = albumArtInfo.value?.copy(bitmap = null)
+        MediaTabBitmapHolder.clearBitmap()
+        tryGetAlbumArt()
     }
 }
 

@@ -49,7 +49,8 @@ fun MediaTab(
     gradientInfo: GradientInfo? = null,
     isGenerating: Boolean = false,
     onGenerateGradient: () -> Unit = {},
-    onSendGradient: () -> Unit = {}
+    onSendGradient: () -> Unit = {},
+    onRefreshAlbumArt: () -> Unit = {}
 ) {
     Column(
         modifier = Modifier
@@ -98,6 +99,41 @@ fun MediaTab(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        FilledTonalButton(
+                            onClick = onRefreshAlbumArt,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = "Refresh",
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Retry")
+                        }
+                    }
+                }
+                
+                // Add refresh button overlay when album art is available too
+                if (albumArtInfo?.bitmap != null) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                    ) {
+                        FilledTonalButton(
+                            onClick = onRefreshAlbumArt,
+                            modifier = Modifier.size(36.dp),
+                            shape = CircleShape,
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = "Refresh Album Art",
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
             }

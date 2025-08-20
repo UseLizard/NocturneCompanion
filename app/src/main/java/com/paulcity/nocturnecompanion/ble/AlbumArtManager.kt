@@ -29,6 +29,9 @@ class AlbumArtManager {
             return value.data.size
         }
     }
+    
+    // Callback for when new album art is cached
+    private var onAlbumArtCachedCallback: ((CachedAlbumArt, String, String) -> Unit)? = null
 
     fun getArtFromCache(cacheKey: String): CachedAlbumArt? {
         return albumArtCache.get(cacheKey)
@@ -41,10 +44,40 @@ class AlbumArtManager {
         val cacheKey = generateMetadataHash(artist, album)
         return albumArtCache.get(cacheKey)
     }
+
+    fun getArtWithStatus(artist: String?, album: String?): Pair<AlbumArtStatus, CachedAlbumArt?> {
+        val cacheKey = generateMetadataHash(artist, album)
+        val cachedArt = albumArtCache.get(cacheKey)
+        return Pair(cachedArt?.status ?: AlbumArtStatus.NOT_REQUESTED, cachedArt)
+    }
+
+    fun updateArtStatus(artist: String?, album: String?, status: AlbumArtStatus) {
+        val cacheKey = generateMetadataHash(artist, album)
+        albumArtCache.get(cacheKey)?.let {
+            albumArtCache.put(cacheKey, it.copy(status = status))
+        }
+    }
+
+    fun cacheAlbumArt(artist: String?, album: String?, data: ByteArray, checksum: String) {
+        val cacheKey = generateMetadataHash(artist, album)
+        val cachedArt = CachedAlbumArt(data, checksum, AlbumArtStatus.AVAILABLE)
+        albumArtCache.put(cacheKey, cachedArt)
+        
+        // Trigger callback for automatic transmission
+        onAlbumArtCachedCallback?.invoke(cachedArt, artist ?: "", album ?: "")
+    }
+    
+    /**
+     * Set callback to be invoked when new album art is cached
+     */
+    fun setOnAlbumArtCachedCallback(callback: (CachedAlbumArt, String, String) -> Unit) {
+        onAlbumArtCachedCallback = callback
+    }
     
     data class CachedAlbumArt(
         val data: ByteArray,
-        val checksum: String
+        val checksum: String,
+        val status: AlbumArtStatus = AlbumArtStatus.NOT_REQUESTED
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -77,10 +110,10 @@ class AlbumArtManager {
     }
     
     /**
-     * Extract and process album art from MediaMetadata
+     * Extract and process album art from MediaMetadata for currently playing track only
      * @return Compressed WebP byte array and checksum, or null if no art available
      */
-    fun extractAlbumArt(metadata: MediaMetadata?): Pair<ByteArray, String>? {
+    fun extractAlbumArt(metadata: MediaMetadata?): CachedAlbumArt? {
         if (metadata == null) {
             Log.d(TAG, "No metadata provided")
             return null
@@ -89,14 +122,21 @@ class AlbumArtManager {
         // Generate cache key from track info using MD5 hash (matching nocturned)
         val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
         val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+        val track = metadata.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
         
         // Use MD5 hash of artist-album as cache key
         val cacheKey = generateMetadataHash(artist, album)
         
-        // Check cache first
+        // Check if this is for currently playing track by verifying with MediaTabBitmapHolder
+        if (!com.paulcity.nocturnecompanion.ui.MediaTabBitmapHolder.isCurrentTrack(artist, track)) {
+            Log.d(TAG, "Skipping album art extraction for non-current track: $artist - $track")
+            return null
+        }
+        
+        // Check cache first, but clear old entries to ensure only current track art
         albumArtCache.get(cacheKey)?.let { cached ->
-            Log.d(TAG, "Album art found in cache for: $cacheKey")
-            return Pair(cached.data, cached.checksum)
+            Log.d(TAG, "Album art found in cache for current track: $cacheKey")
+            return cached
         }
         
         // Extract bitmap from metadata
@@ -126,19 +166,22 @@ class AlbumArtManager {
             squareBitmap.compress(compressFormat, compressionQuality, outputStream)
             val imageData = outputStream.toByteArray()
             
-            // Calculate checksum
-            val checksum = calculateChecksum(imageData)
+            // Calculate album hash using the same algorithm as nocturned
+            val checksum = calculateAlbumHash(album, artist)
             
-            Log.d(TAG, "Compressed album art size: ${imageData.size} bytes ($imageFormat), SHA-256: $checksum")
-            Log.d(TAG, "Caching with MD5 hash: $cacheKey for $artist - $album")
+            Log.d(TAG, "Compressed album art size: ${imageData.size} bytes ($imageFormat), Album Hash: $checksum")
             
             // Cache the result
-            albumArtCache.put(cacheKey, CachedAlbumArt(imageData, checksum))
+            val cachedArt = CachedAlbumArt(imageData, checksum, AlbumArtStatus.AVAILABLE)
+            albumArtCache.put(cacheKey, cachedArt)
+            
+            // Trigger callback for automatic transmission
+            onAlbumArtCachedCallback?.invoke(cachedArt, artist, album)
             
             // Clean up
             squareBitmap.recycle()
             
-            return Pair(imageData, checksum)
+            return cachedArt
             
         } catch (e: Exception) {
             Log.e(TAG, "Error processing album art", e)
@@ -174,12 +217,22 @@ class AlbumArtManager {
     }
     
     /**
-     * Calculate SHA-256 checksum for data integrity verification
+     * Calculate integer hash matching nocturned's album hash algorithm
+     * This uses the same algorithm as BinaryProtocolV2.calculateAlbumHash()
      */
     private fun calculateChecksum(data: ByteArray): String {
-        val md = MessageDigest.getInstance("SHA-256")
-        val digest = md.digest(data)
-        return digest.joinToString("") { "%02x".format(it) }
+        // For album art, we don't use the data checksum but the metadata hash
+        // This will be replaced by the actual album hash when extractAlbumArt is called
+        return "placeholder"
+    }
+    
+    /**
+     * Calculate album hash using the same algorithm as nocturned backend
+     * This matches the algorithm in BinaryProtocolV2.kt and NocturneServiceBLE.kt
+     */
+    private fun calculateAlbumHash(album: String, artist: String): String {
+        val combined = "$album|$artist"
+        return combined.hashCode().toString()
     }
     
     /**
@@ -188,6 +241,14 @@ class AlbumArtManager {
     fun clearCache() {
         albumArtCache.evictAll()
         Log.d(TAG, "Album art cache cleared")
+    }
+    
+    /**
+     * Clear cache for previous track when new track starts to ensure only current track art is cached
+     */
+    fun clearPreviousTrackCache() {
+        albumArtCache.evictAll()
+        Log.d(TAG, "Previous track album art cache cleared to ensure only current track art")
     }
     
     /**

@@ -45,6 +45,12 @@ class MainBroadcastReceiver(private val viewModel: UnifiedMainViewModel) : Broad
                 viewModel.refreshWeatherForBle()
                 Log.d("MainBroadcastReceiver", "Called viewModel.refreshWeatherForBle()")
             }
+            "com.paulcity.nocturnecompanion.MEDIA_SESSION_CHANGED" -> {
+                Log.d("MainBroadcastReceiver", "Received MEDIA_SESSION_CHANGED broadcast")
+                // Media session changed, trigger album art refresh with retry mechanism
+                viewModel.forceAlbumArtReload()
+                Log.d("MainBroadcastReceiver", "Called viewModel.forceAlbumArtReload() for media session change")
+            }
         }
     }
 }

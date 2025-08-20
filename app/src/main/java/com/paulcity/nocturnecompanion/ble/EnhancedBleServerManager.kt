@@ -80,9 +80,30 @@ class EnhancedBleServerManager(
     
     // Album art management
     val albumArtManager = AlbumArtManager()
-    private val mediaStoreAlbumArtManager = MediaStoreAlbumArtManager(context)
+    val mediaStoreAlbumArtManager = MediaStoreAlbumArtManager(context)
     private val albumArtTransferJobs = ConcurrentHashMap<String, Job>()
     private val binaryEncoder = BinaryAlbumArtEncoder()
+    private val pendingAlbumArtQueries = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    
+    init {
+        // Set up automatic album art transmission when new art is cached
+        albumArtManager.setOnAlbumArtCachedCallback { cachedArt, artist, album ->
+            Log.d(TAG, "Auto-transmission: New album art cached for $artist - $album")
+            
+            // Generate track ID for transmission
+            val trackId = "$artist|$album"
+            
+            // Send album art to all connected devices
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    sendAlbumArt(cachedArt.data, cachedArt.checksum, trackId)
+                    Log.d(TAG, "Auto-sent cached album art: ${cachedArt.data.size} bytes")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in automatic cached album art transmission", e)
+                }
+            }
+        }
+    }
     
     // Debug logging
     private val debugLogger = DebugLogger()
@@ -927,13 +948,18 @@ class EnhancedBleServerManager(
             BinaryProtocolV2.MSG_CMD_ALBUM_ART_QUERY -> {
                 val hash = BinaryProtocolV2.parseAlbumArtQueryPayload(payload)
                 Log.d(TAG, "Binary command: ALBUM_ART_QUERY hash=$hash, device=${device.address}")
-                // Use the hash as a track identifier since we don't have the actual track name here
+                // Pass the hash from nocturned for identification, don't use it as checksum
                 onCommandReceived(Command("album_art_query", payload = mapOf(
                     "hash" to hash,
-                    "checksum" to hash,  // Use hash as checksum for now
-                    "track_id" to hash,  // Use hash as track_id to avoid empty string
+                    "track_id" to hash,  // Use hash as track_id for identification
                     "device_address" to device.address
                 )))
+            }
+            
+            BinaryProtocolV2.MSG_ALBUM_ART_NEEDED_RESPONSE -> {
+                val needed = BinaryProtocolV2.parseAlbumArtNeededResponsePayload(payload)
+                Log.d(TAG, "Binary response: ALBUM_ART_NEEDED_RESPONSE needed=$needed, device=${device.address}")
+                handleAlbumArtNeededResponse(device, needed ?: true) // Default to true if parse fails
             }
             
             BinaryProtocolV2.MSG_CMD_TEST_ALBUM_ART -> {
@@ -1568,7 +1594,8 @@ class EnhancedBleServerManager(
             // Call the private suspend function, not the public one (avoid recursion)
             try {
                 val deviceContext = connectedDevices[device.address] ?: return@launch
-                // Always use binary protocol
+                // Send album art directly without querying availability (simplified approach)
+                Log.d(TAG, "Sending album art directly to device ${device.address}")
                 sendAlbumArtBinary(device, albumArtData, checksum, trackId, deviceContext)
             } catch (e: Exception) {
                 Log.e(TAG, "Error during album art transfer", e)
@@ -1837,6 +1864,80 @@ class EnhancedBleServerManager(
     }
     */
     
+    private fun handleAlbumArtNeededResponse(device: BluetoothDevice, needed: Boolean) {
+        Log.d(TAG, "Received album art needed response from ${device.address}: needed=$needed")
+        
+        // Find the pending query for this device and complete it
+        val pendingQuery = pendingAlbumArtQueries.remove(device.address)
+        if (pendingQuery != null) {
+            pendingQuery.complete(needed)
+            Log.d(TAG, "Completed pending album art query for ${device.address} with result: $needed")
+        } else {
+            Log.w(TAG, "Received album art response from ${device.address} but no pending query found")
+        }
+    }
+    
+    private suspend fun queryAlbumArtAvailability(
+        device: BluetoothDevice,
+        albumArtData: ByteArray,
+        checksum: String,
+        trackId: String,
+        deviceContext: DeviceContext
+    ): Boolean {
+        Log.d(TAG, "Querying album art availability for device ${device.address}: checksum=$checksum")
+        
+        // Prepare compressed album art data for the query
+        val binaryTransfer = binaryEncoder.encodeAlbumArtTransfer(
+            imageData = albumArtData,
+            checksum = checksum,
+            trackId = trackId,
+            mtu = deviceContext.mtu
+        )
+        
+        // Create availability query payload
+        val queryPayload = BinaryProtocolV2.createAlbumArtAvailabilityQueryPayload(
+            checksum = checksum,
+            trackId = trackId,
+            compressedSize = binaryTransfer.binarySize,
+            isGzipCompressed = true
+        )
+        
+        // Create query message
+        val queryMessage = BinaryProtocolV2.createMessage(
+            messageType = BinaryProtocolV2.MSG_ALBUM_ART_AVAILABLE_QUERY,
+            payload = queryPayload
+        )
+        
+        // Send query and wait for response
+        val responseReceived = CompletableDeferred<Boolean>()
+        
+        // Store the response handler (we'll need to modify the message handling to process responses)
+        pendingAlbumArtQueries[device.address] = responseReceived
+        
+        // Send the query
+        val message = MessageQueue.Message(
+            device = device,
+            characteristicUuid = BleConstants.ALBUM_ART_TX_CHAR_UUID,
+            data = queryMessage,
+            priority = MessageQueue.Priority.HIGH,
+            isBinary = true
+        )
+        messageQueue.enqueue(message)
+        
+        Log.d(TAG, "Sent album art availability query to ${device.address}, waiting for response...")
+        
+        // Wait for response with timeout
+        return try {
+            withTimeout(5000L) { // 5 second timeout
+                responseReceived.await()
+            }
+        } catch (e: TimeoutCancellationException) {
+            Log.w(TAG, "Album art availability query timed out for ${device.address}, assuming needed")
+            pendingAlbumArtQueries.remove(device.address)
+            true // Default to sending if we don't get a response
+        }
+    }
+
     private suspend fun sendAlbumArtBinary(
         device: BluetoothDevice,
         albumArtData: ByteArray,
@@ -2667,15 +2768,15 @@ class EnhancedBleServerManager(
     fun sendIncrementalUpdate(messageType: Short, value: Any) {
         // Create binary payload based on value type
         val payload = when (value) {
-            is String -> BinaryProtocol.createStringPayload(value)
-            is Long -> BinaryProtocol.createLongPayload(value)
-            is Boolean -> BinaryProtocol.createBooleanPayload(value)
-            is Byte -> BinaryProtocol.createBytePayload(value)
+            is String -> BinaryProtocolV2.createStringPayload(value)
+            is Long -> BinaryProtocolV2.createLongPayload(value)
+            is Boolean -> BinaryProtocolV2.createBooleanPayload(value)
+            is Byte -> BinaryProtocolV2.createBytePayload(value)
             is Pair<*, *> -> {
                 // Handle artist+album pair
                 val artist = value.first as? String ?: ""
                 val album = value.second as? String ?: ""
-                BinaryProtocol.createArtistAlbumPayload(artist, album)
+                BinaryProtocolV2.createArtistAlbumPayload(artist, album)
             }
             else -> {
                 Log.e(TAG, "Unsupported incremental update type: ${value::class.simpleName}")
@@ -2683,14 +2784,8 @@ class EnhancedBleServerManager(
             }
         }
         
-        // Create binary message with header
-        val header = BinaryProtocol.BinaryHeader(
-            messageType = messageType,
-            chunkIndex = 0,
-            totalSize = payload.size
-        )
-        
-        val binaryMessage = BinaryProtocol.createBinaryMessage(header, payload)
+        // Create binary message using BinaryProtocolV2
+        val binaryMessage = BinaryProtocolV2.createMessage(messageType, payload)
         
         // Send to all connected devices
         connectedDevices.values.forEach { deviceContext ->

@@ -78,6 +78,7 @@ class UnifiedMainActivity : ComponentActivity() {
                 addAction(NocturneServiceBLE.ACTION_NOTIFICATION)
                 addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
                 addAction("com.paulcity.nocturnecompanion.REQUEST_WEATHER_REFRESH")
+                addAction("com.paulcity.nocturnecompanion.MEDIA_SESSION_CHANGED")
             }
 
             if (Build.VERSION.SDK_INT >= 34) {

@@ -3,6 +3,9 @@ package com.paulcity.nocturnecompanion.ble.protocol
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import java.io.ByteArrayOutputStream
+import java.util.zip.GZIPOutputStream
+import java.util.zip.GZIPInputStream
 
 /**
  * Encoder for binary album art protocol
@@ -31,25 +34,30 @@ class BinaryAlbumArtEncoder {
         checksum: String,
         trackId: String,
         chunkSize: Int,
-        isTest: Boolean = false
+        isTest: Boolean = false,
+        compressedSize: Int? = null
     ): ByteArray {
-        val totalChunks = (imageData.size + chunkSize - 1) / chunkSize
-        
         // Convert hex checksum to bytes (SHA-256 should be 32 bytes)
         val checksumBytes = BinaryProtocolV2.hexToBytes(checksum)
         
-        // Create payload using BinaryProtocolV2
+        // Use compressed size if provided, otherwise original size
+        val actualImageSize = compressedSize ?: imageData.size
+        val actualTotalChunks = (actualImageSize + chunkSize - 1) / chunkSize
+        
+        // Create payload using BinaryProtocolV2 with compression info
         val payload = BinaryProtocolV2.AlbumArtStartPayload(
             checksum = checksumBytes,
-            totalChunks = totalChunks,
-            imageSize = imageData.size,
-            trackId = trackId
+            totalChunks = actualTotalChunks,
+            imageSize = imageData.size,  // Original size
+            trackId = trackId,
+            compressedSize = compressedSize ?: 0,
+            isGzipCompressed = compressedSize != null
         )
         
         // Use BinaryProtocolV2 message types (0x03xx range)
         val messageType = if (isTest) BinaryProtocolV2.MSG_TEST_ALBUM_ART_START else BinaryProtocolV2.MSG_ALBUM_ART_START
         
-        Log.d(TAG, "Encoding ${if (isTest) "test " else ""}album art start - Type: 0x${messageType.toString(16)}, Size: ${imageData.size}, Chunks: $totalChunks")
+        Log.d(TAG, "Encoding ${if (isTest) "test " else ""}album art start - Type: 0x${messageType.toString(16)}, Size: ${imageData.size}, Chunks: $actualTotalChunks")
         
         // Create message using BinaryProtocolV2
         return BinaryProtocolV2.createMessage(messageType, payload.toByteArray())
@@ -104,7 +112,7 @@ class BinaryAlbumArtEncoder {
      */
     fun calculateOptimalChunkSize(mtu: Int): Int {
         val effectiveMtu = mtu - 3  // BLE overhead
-        val binaryOverhead = BinaryProtocol.HEADER_SIZE + 4  // Header + some margin
+        val binaryOverhead = BinaryProtocolV2.HEADER_SIZE + 4  // Header + some margin
         return maxOf(50, effectiveMtu - binaryOverhead)
     }
     
@@ -131,7 +139,28 @@ class BinaryAlbumArtEncoder {
     }
     
     /**
-     * Encode complete album art transfer to binary messages
+     * Compress image data using GZIP
+     */
+    private fun compressImageData(imageData: ByteArray): ByteArray {
+        val startTime = System.currentTimeMillis()
+        
+        val outputStream = ByteArrayOutputStream()
+        GZIPOutputStream(outputStream).use { gzipStream ->
+            gzipStream.write(imageData)
+        }
+        
+        val compressedData = outputStream.toByteArray()
+        val compressionTime = System.currentTimeMillis() - startTime
+        val compressionRatio = imageData.size.toFloat() / compressedData.size
+        
+        Log.d(TAG, "GZIP compression - Original: ${imageData.size} bytes -> Compressed: ${compressedData.size} bytes, " +
+                "Ratio: ${String.format("%.2f", compressionRatio)}x, Time: ${compressionTime}ms")
+        
+        return compressedData
+    }
+
+    /**
+     * Encode complete album art transfer to binary messages with GZIP compression
      * Returns list of all messages ready to send
      */
     fun encodeAlbumArtTransfer(
@@ -143,14 +172,17 @@ class BinaryAlbumArtEncoder {
     ): AlbumArtBinaryTransfer {
         val startTime = System.currentTimeMillis()
         
+        // Compress the image data first
+        val compressedData = compressImageData(imageData)
+        
         // Calculate optimal chunk size for binary protocol
         val chunkSize = calculateOptimalChunkSize(mtu)
         
-        // Create start message
-        val startMessage = encodeAlbumArtStart(imageData, checksum, trackId, chunkSize, isTest)
+        // Create start message with original size but compressed data info
+        val startMessage = encodeAlbumArtStart(imageData, checksum, trackId, chunkSize, isTest, compressedData.size)
         
-        // Create chunks
-        val chunks = createChunks(imageData, chunkSize)
+        // Create chunks from compressed data
+        val chunks = createChunks(compressedData, chunkSize)
         val chunkMessages = chunks.mapIndexed { index, chunkData ->
             encodeAlbumArtChunk(chunkData, index, isTest)
         }
@@ -161,7 +193,7 @@ class BinaryAlbumArtEncoder {
         // Update stats
         val encodingTime = System.currentTimeMillis() - startTime
         val totalBinarySize = startMessage.size + chunkMessages.sumOf { it.size } + endMessage.size
-        val compressionRatio = imageData.size.toFloat() / totalBinarySize
+        val compressionRatio = imageData.size.toFloat() / compressedData.size
         
         _encodingStats.value = EncodingStats(
             lastImageSize = imageData.size,
@@ -170,8 +202,8 @@ class BinaryAlbumArtEncoder {
             compressionRatio = compressionRatio
         )
         
-        Log.d(TAG, "Binary encoding complete - Original: ${imageData.size} bytes, Binary: $totalBinarySize bytes, " +
-                "Compression: ${String.format("%.2f", compressionRatio)}x, Time: ${encodingTime}ms")
+        Log.d(TAG, "Binary encoding complete - Original: ${imageData.size} bytes, Compressed: ${compressedData.size} bytes, " +
+                "Binary: $totalBinarySize bytes, Compression: ${String.format("%.2f", compressionRatio)}x, Time: ${encodingTime}ms")
         
         return AlbumArtBinaryTransfer(
             startMessage = startMessage,
@@ -180,7 +212,8 @@ class BinaryAlbumArtEncoder {
             totalChunks = chunks.size,
             chunkSize = chunkSize,
             originalSize = imageData.size,
-            binarySize = totalBinarySize
+            binarySize = totalBinarySize,
+            compressedSize = compressedData.size
         )
     }
     
@@ -191,10 +224,11 @@ class BinaryAlbumArtEncoder {
         val totalChunks: Int,
         val chunkSize: Int,
         val originalSize: Int,
-        val binarySize: Int
+        val binarySize: Int,
+        val compressedSize: Int = originalSize
     ) {
         val compressionRatio: Float
-            get() = originalSize.toFloat() / binarySize
+            get() = originalSize.toFloat() / compressedSize
             
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -209,6 +243,7 @@ class BinaryAlbumArtEncoder {
             if (chunkSize != other.chunkSize) return false
             if (originalSize != other.originalSize) return false
             if (binarySize != other.binarySize) return false
+            if (compressedSize != other.compressedSize) return false
 
             return true
         }
@@ -221,6 +256,7 @@ class BinaryAlbumArtEncoder {
             result = 31 * result + chunkSize
             result = 31 * result + originalSize
             result = 31 * result + binarySize
+            result = 31 * result + compressedSize
             return result
         }
     }

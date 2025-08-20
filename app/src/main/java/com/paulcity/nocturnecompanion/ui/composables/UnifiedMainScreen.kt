@@ -147,7 +147,8 @@ private fun MainScreenContent(
                                 gradientInfo = viewModel.gradientInfo.value,
                                 isGenerating = viewModel.isGeneratingGradient.value,
                                 onGenerateGradient = { viewModel.generateGradientFromAlbumArt() },
-                                onSendGradient = { viewModel.sendGradientColors() }
+                                onSendGradient = { viewModel.sendGradientColors() },
+                                onRefreshAlbumArt = { viewModel.forceAlbumArtReload() }
                             )
                             5 -> CommandsTab(
                                 lastCommand = viewModel.lastCommand.value,

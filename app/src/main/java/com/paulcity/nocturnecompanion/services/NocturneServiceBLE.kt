@@ -26,6 +26,7 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.gson.Gson
 import com.paulcity.nocturnecompanion.ble.protocol.BinaryProtocol
 import com.paulcity.nocturnecompanion.ble.protocol.BinaryProtocolV2
+import com.paulcity.nocturnecompanion.ble.AlbumArtStatus
 import com.paulcity.nocturnecompanion.ble.BleConstants
 import com.paulcity.nocturnecompanion.ble.WeatherBleManager
 import com.paulcity.nocturnecompanion.data.Command
@@ -45,6 +46,7 @@ import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationManagerCompat
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
+import java.security.MessageDigest
 
 class NocturneServiceBLE : Service() {
 
@@ -89,17 +91,6 @@ class NocturneServiceBLE : Service() {
     private var audioPlaybackCallback: AudioManager.AudioPlaybackCallback? = null
     private var isAudioActuallyPlaying = false
     
-    // Track pending album art requests (device address -> request info)
-    data class PendingAlbumArtRequest(
-        val deviceAddress: String,
-        val trackId: String,
-        val checksum: String,
-        val timestamp: Long,
-        val retryCount: Int = 0,
-        val nextRetryTime: Long = 0
-    )
-    private val pendingAlbumArtRequests = mutableMapOf<String, PendingAlbumArtRequest>()
-    
     // Audio events tracking
     private val audioEvents = mutableListOf<AudioEvent>()
     private val MAX_AUDIO_EVENTS = 500
@@ -141,6 +132,36 @@ class NocturneServiceBLE : Service() {
                     Log.d(TAG, "Received manual time sync request broadcast")
                     sendTimeSync()
                 }
+                ACTION_ALBUM_ART_AVAILABLE -> {
+                    Log.d(TAG, "🎨 ALBUM_ART_AVAILABLE broadcast received!")
+                    val artist = intent.getStringExtra("artist") ?: ""
+                    val album = intent.getStringExtra("album") ?: ""
+                    val title = intent.getStringExtra("title") ?: ""
+                    
+                    // Get bitmap from static holder (avoids Intent size limits)
+                    val bitmap = com.paulcity.nocturnecompanion.ui.MediaTabBitmapHolder.getBitmap()
+                    Log.d(TAG, "🎨 Received album art available broadcast for: $artist - $album - $title, bitmap available: ${bitmap != null}")
+                    
+                    if (bitmap != null) {
+                        // Convert bitmap to byte array
+                        val stream = java.io.ByteArrayOutputStream()
+                        bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
+                        val bitmapData = stream.toByteArray()
+                        
+                        // Trigger album art processing using the bitmap from the Media tab
+                        if (::bleServerManager.isInitialized) {
+                            Log.d(TAG, "🎨 BLE server initialized and bitmap data available - calling triggerAlbumArtFromBitmap")
+                            triggerAlbumArtFromBitmap(artist, album, title, bitmapData)
+                        } else {
+                            Log.w(TAG, "🎨 Cannot process album art: bleServerManager not initialized")
+                        }
+                        
+                        // Clear bitmap after use
+                        com.paulcity.nocturnecompanion.ui.MediaTabBitmapHolder.clearBitmap()
+                    } else {
+                        Log.w(TAG, "🎨 No bitmap available from MediaTabBitmapHolder")
+                    }
+                }
             }
         }
     }
@@ -161,14 +182,45 @@ class NocturneServiceBLE : Service() {
             // Generate track ID from metadata
             val newTrackId = "${lastState.artist}|${lastState.album}|${lastState.track}"
             
-            // Track ID changed - nocturned will request album art if needed
+            // Track ID changed - automatically extract and send album art
             if (newTrackId != lastTrackId && metadata != null) {
                 lastTrackId = newTrackId
                 Log.d(TAG, "Track changed to: $newTrackId")
-                // Album art will be sent only when nocturned requests it via album_art_query
                 
-                // Check if we can fulfill any pending album art requests with the new metadata
-                checkPendingAlbumArtRequests()
+                // Extract album art - note: automatic transmission will also happen via callback
+                serviceScope.launch(Dispatchers.IO) {
+                    try {
+                        // Debug: Log available metadata keys
+                        Log.d(TAG, "DEBUG: Available metadata keys:")
+                        metadata.keySet()?.forEach { key ->
+                            val value = when (key) {
+                                MediaMetadata.METADATA_KEY_ALBUM_ART_URI -> metadata.getString(key)
+                                MediaMetadata.METADATA_KEY_ALBUM_ART -> "Bitmap available: ${metadata.getBitmap(key) != null}"
+                                MediaMetadata.METADATA_KEY_ART -> "Bitmap available: ${metadata.getBitmap(key) != null}"
+                                MediaMetadata.METADATA_KEY_DISPLAY_ICON -> "Bitmap available: ${metadata.getBitmap(key) != null}"
+                                else -> metadata.getString(key) ?: "null"
+                            }
+                            Log.d(TAG, "DEBUG:   $key = $value")
+                        }
+                        
+                        val albumArtResult = bleServerManager.albumArtManager.extractAlbumArt(metadata)
+                        if (albumArtResult != null) {
+                            Log.d(TAG, "Album art extracted for new track: ${albumArtResult.data.size} bytes, checksum: ${albumArtResult.checksum}")
+                            // Note: Transmission is handled automatically by the callback mechanism
+                        } else {
+                            Log.d(TAG, "No album art available for auto-transmission")
+                            
+                            // Try to force extraction if we see an ALBUM_ART_URI
+                            val albumArtUri = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
+                            if (!albumArtUri.isNullOrEmpty()) {
+                                Log.d(TAG, "Found ALBUM_ART_URI: $albumArtUri - attempting manual extraction")
+                                // We could potentially load from URI here if needed
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error in automatic album art extraction", e)
+                    }
+                }
                 
                 // Track metadata change event
                 trackAudioEvent(
@@ -265,6 +317,7 @@ class NocturneServiceBLE : Service() {
         const val ACTION_TEST_ALBUM_ART = "com.paulcity.nocturnecompanion.TEST_ALBUM_ART_COMMAND"
         const val ACTION_SEND_TIME_SYNC = "com.paulcity.nocturnecompanion.SEND_BLE_TIME_SYNC"
         const val ACTION_AUDIO_EVENT = "com.paulcity.nocturnecompanion.AUDIO_EVENT"
+        const val ACTION_ALBUM_ART_AVAILABLE = "com.paulcity.nocturnecompanion.ALBUM_ART_AVAILABLE"
         
         // Extras
         const val EXTRA_JSON_DATA = "json_data"
@@ -305,6 +358,7 @@ class NocturneServiceBLE : Service() {
                 addAction(ACTION_UPDATE_ALBUM_ART_SETTINGS)
                 addAction(ACTION_TEST_ALBUM_ART)
                 addAction(ACTION_SEND_TIME_SYNC)
+                addAction(ACTION_ALBUM_ART_AVAILABLE)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(settingsUpdateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -493,6 +547,11 @@ class NocturneServiceBLE : Service() {
                     // Send current weather data if available
                     Log.d(TAG, "Sending initial weather data to ready device")
                     sendInitialWeatherData()
+                    
+                    // Send album art for current track if available
+                    delay(200)
+                    Log.d(TAG, "Sending album art for current track to ready device")
+                    sendCurrentTrackAlbumArt(device.address)
                 }
             }
         )
@@ -606,13 +665,12 @@ class NocturneServiceBLE : Service() {
                 
                 // Get device address from command context (passed via BLE server)
                 val deviceAddress = payload?.get("device_address") as? String
+                
                 if (deviceAddress != null) {
-                    Log.d(TAG, "BLE_LOG: Calling handleAlbumArtQuery for device: $deviceAddress")
-                    // Use hash as checksum if checksum is empty
-                    val finalChecksum = if (checksum.isNotEmpty()) checksum else hash
-                    handleAlbumArtQuery(deviceAddress, trackId, finalChecksum)
+                    Log.d(TAG, "BLE_LOG: Processing album art query for device: $deviceAddress")
+                    handleAlbumArtQuery(deviceAddress, hash)
                 } else {
-                    Log.e(TAG, "BLE_LOG: No device address in album art query")
+                    Log.w(TAG, "BLE_LOG: No device address provided for album art query")
                 }
                 return
             }
@@ -724,9 +782,8 @@ class NocturneServiceBLE : Service() {
                         handleTestAlbumArtRequest(command)
                     }
                     "album_art_query", "album_art_needed" -> {
-                        // Handle album art query with hash validation
-                        Log.d(TAG, "Album art query received")
-                        handleAlbumArtQuery(command)
+                        // Album art queries are no longer supported - art is sent automatically when available
+                        Log.d(TAG, "Album art query received but queries are no longer supported - art is sent automatically when available")
                     }
                     else -> {
                         Log.w(TAG, "Unknown command: ${command.command}")
@@ -827,25 +884,13 @@ class NocturneServiceBLE : Service() {
     private fun observeDeviceConnections() {
         serviceScope.launch {
             bleServerManager.connectedDevicesList.collect { devices ->
-                // Clean up pending requests for disconnected devices
-                val connectedAddresses = devices.map { it.address }.toSet()
-                val disconnectedAddresses = pendingAlbumArtRequests.keys.filter { it !in connectedAddresses }
-                
-                disconnectedAddresses.forEach { address ->
-                    Log.d(TAG, "Removing pending album art request for disconnected device: $address")
-                    pendingAlbumArtRequests.remove(address)
-                }
+                // Device cleanup - no longer needed with simplified album art transmission
             }
         }
     }
     
     private fun startPeriodicCleanup() {
-        serviceScope.launch {
-            while (isActive) {
-                delay(10000) // Run every 10 seconds
-                cleanupPendingRequests()
-            }
-        }
+        // Cleanup coroutine no longer needed with simplified album art transmission
     }
 
     private fun observeDebugLogs() {
@@ -874,6 +919,12 @@ class NocturneServiceBLE : Service() {
                     delay(500) // Wait for device to setup notifications
                     sendTimeSync()
                     sendStateUpdate(forceUpdate = true)
+                    
+                    // Send album art for current track to newly connected devices
+                    delay(200)
+                    devices.forEach { device ->
+                        sendCurrentTrackAlbumArt(device.address)
+                    }
                 }
                 previousDeviceCount = devices.size
             }
@@ -1013,7 +1064,7 @@ class NocturneServiceBLE : Service() {
         if (current.artist != previous.artist || current.album != previous.album) {
             Log.d(TAG, "BLE_LOG: Sending combined artist+album update: ${current.artist} / ${current.album}")
             bleServerManager.sendIncrementalUpdate(
-                BinaryProtocol.MSG_STATE_ARTIST_ALBUM,
+                BinaryProtocolV2.MSG_STATE_ARTIST_ALBUM,
                 Pair(current.artist ?: "", current.album ?: "")
             )
         }
@@ -1022,7 +1073,7 @@ class NocturneServiceBLE : Service() {
         if (current.track != previous.track) {
             Log.d(TAG, "BLE_LOG: Sending incremental track update: ${current.track}")
             bleServerManager.sendIncrementalUpdate(
-                BinaryProtocol.MSG_STATE_TRACK,
+                BinaryProtocolV2.MSG_STATE_TRACK,
                 current.track ?: ""
             )
         }
@@ -1031,7 +1082,7 @@ class NocturneServiceBLE : Service() {
         if (current.duration_ms != previous.duration_ms) {
             Log.d(TAG, "BLE_LOG: Sending incremental duration update: ${current.duration_ms}ms")
             bleServerManager.sendIncrementalUpdate(
-                BinaryProtocol.MSG_STATE_DURATION,
+                BinaryProtocolV2.MSG_STATE_DURATION,
                 current.duration_ms
             )
         }
@@ -1042,7 +1093,7 @@ class NocturneServiceBLE : Service() {
         if (positionDiff >= POSITION_CHANGE_THRESHOLD_MS || positionReset) {
             Log.d(TAG, "BLE_LOG: Sending incremental position update: ${current.position_ms}ms (diff: $positionDiff, reset: $positionReset)")
             bleServerManager.sendIncrementalUpdate(
-                BinaryProtocol.MSG_STATE_POSITION,
+                BinaryProtocolV2.MSG_STATE_POSITION,
                 current.position_ms
             )
         }
@@ -1051,7 +1102,7 @@ class NocturneServiceBLE : Service() {
         if (current.is_playing != previous.is_playing) {
             Log.d(TAG, "BLE_LOG: Sending incremental play state update: ${current.is_playing}")
             bleServerManager.sendIncrementalUpdate(
-                BinaryProtocol.MSG_STATE_PLAY_STATE,
+                BinaryProtocolV2.MSG_STATE_PLAY_STATUS,
                 current.is_playing
             )
         }
@@ -1060,7 +1111,7 @@ class NocturneServiceBLE : Service() {
         if (current.volume_percent != previous.volume_percent) {
             Log.d(TAG, "BLE_LOG: Sending incremental volume update: ${current.volume_percent}%")
             bleServerManager.sendIncrementalUpdate(
-                BinaryProtocol.MSG_STATE_VOLUME,
+                BinaryProtocolV2.MSG_STATE_VOLUME,
                 current.volume_percent.toByte()
             )
         }
@@ -1458,201 +1509,9 @@ class NocturneServiceBLE : Service() {
             .build()
     }
 
-    private fun handleAlbumArtQuery(deviceAddress: String, trackId: String, requestedChecksum: String) {
-        Log.d(TAG, "BLE_LOG: Processing album art query from $deviceAddress for checksum: $requestedChecksum")
-        
-        // Try to send album art immediately if available
-        val metadata = currentMediaController?.metadata
-        if (metadata != null) {
-            val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
-            val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
-            val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
-            
-            Log.d(TAG, "BLE_LOG: Current media: artist=$artist, album=$album, title=$title")
-            
-            // Generate MD5 hash for current media
-            val currentHash = bleServerManager.albumArtManager.generateMetadataHash(artist, album)
-            
-            Log.d(TAG, "BLE_LOG: Comparing hashes - requested: $requestedChecksum, current: $currentHash")
-            
-            // Check if this matches the requested track
-            if (currentHash == requestedChecksum || requestedChecksum.isEmpty() || requestedChecksum == "current") {
-                Log.d(TAG, "BLE_LOG: Hash matches or is current, attempting to extract album art")
-                // Try to extract and send album art
-                val albumArtResult = bleServerManager.albumArtManager.extractAlbumArt(metadata)
-                if (albumArtResult != null) {
-                    val (artData, sha256Checksum) = albumArtResult
-                    Log.d(TAG, "BLE_LOG: Album art extracted successfully: ${artData.size} bytes, SHA256: $sha256Checksum")
-                    
-                    // Send the album art
-                    bleServerManager.sendAlbumArtToDevice(deviceAddress, artData, sha256Checksum, trackId)
-                    
-                    // Remove from pending if it was there
-                    pendingAlbumArtRequests.remove(deviceAddress)
-                } else {
-                    // Album art not available yet, add to pending requests
-                    Log.d(TAG, "Album art not available yet, adding to pending requests")
-                    val request = PendingAlbumArtRequest(
-                        deviceAddress = deviceAddress,
-                        trackId = trackId,
-                        checksum = requestedChecksum,
-                        timestamp = System.currentTimeMillis(),
-                        retryCount = 0,
-                        nextRetryTime = System.currentTimeMillis() + 100 // First retry in 100ms
-                    )
-                    pendingAlbumArtRequests[deviceAddress] = request
-                    
-                    // Schedule first retry
-                    scheduleAlbumArtRetry(request)
-                }
-            } else {
-                // Different track, send not available
-                Log.d(TAG, "Hash mismatch - requested track is not current")
-                bleServerManager.sendNoAlbumArtAvailable(deviceAddress, trackId, requestedChecksum, "Track mismatch")
-            }
-        } else {
-            // No media playing
-            Log.d(TAG, "No media controller available")
-            bleServerManager.sendNoAlbumArtAvailable(deviceAddress, trackId, requestedChecksum, "No media playing")
-        }
-    }
     
-    private fun scheduleAlbumArtRetry(request: PendingAlbumArtRequest) {
-        val delays = listOf(100L, 500L, 1000L, 2000L) // Exponential backoff
-        if (request.retryCount < delays.size) {
-            val delay = delays[request.retryCount]
-            Log.d(TAG, "Scheduling album art retry #${request.retryCount + 1} in ${delay}ms for ${request.deviceAddress}")
-            
-            serviceScope.launch {
-                delay(delay)
-                retryAlbumArtRequest(request)
-            }
-        } else {
-            // Max retries reached, remove from pending
-            Log.d(TAG, "Max retries reached for album art request from ${request.deviceAddress}")
-            pendingAlbumArtRequests.remove(request.deviceAddress)
-            bleServerManager.sendNoAlbumArtAvailable(
-                request.deviceAddress, 
-                request.trackId, 
-                request.checksum, 
-                "Album art not available after retries"
-            )
-        }
-    }
     
-    private fun retryAlbumArtRequest(request: PendingAlbumArtRequest) {
-        // Check if request is still pending
-        val currentRequest = pendingAlbumArtRequests[request.deviceAddress]
-        if (currentRequest == null || currentRequest.timestamp != request.timestamp) {
-            Log.d(TAG, "Album art request no longer pending or replaced")
-            return
-        }
-        
-        // Check if album art is now available
-        val metadata = currentMediaController?.metadata
-        if (metadata != null) {
-            val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
-            val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
-            val currentHash = bleServerManager.albumArtManager.generateMetadataHash(artist, album)
-            
-            if (currentHash == request.checksum || request.checksum.isEmpty() || request.checksum == "current") {
-                val albumArtResult = bleServerManager.albumArtManager.extractAlbumArt(metadata)
-                if (albumArtResult != null) {
-                    val (artData, sha256Checksum) = albumArtResult
-                    Log.d(TAG, "Album art now available on retry #${request.retryCount + 1}, sending to ${request.deviceAddress}")
-                    
-                    // Send the album art
-                    bleServerManager.sendAlbumArtToDevice(request.deviceAddress, artData, sha256Checksum, request.trackId)
-                    
-                    // Remove from pending
-                    pendingAlbumArtRequests.remove(request.deviceAddress)
-                } else {
-                    // Still not available, schedule next retry
-                    val updatedRequest = request.copy(
-                        retryCount = request.retryCount + 1,
-                        nextRetryTime = System.currentTimeMillis() + (500L * (request.retryCount + 1))
-                    )
-                    pendingAlbumArtRequests[request.deviceAddress] = updatedRequest
-                    scheduleAlbumArtRetry(updatedRequest)
-                }
-            } else {
-                // Track changed, cancel pending request
-                Log.d(TAG, "Track changed, cancelling pending album art request")
-                pendingAlbumArtRequests.remove(request.deviceAddress)
-                bleServerManager.sendNoAlbumArtAvailable(
-                    request.deviceAddress,
-                    request.trackId,
-                    request.checksum,
-                    "Track changed"
-                )
-            }
-        } else {
-            // No media controller, cancel request
-            Log.d(TAG, "No media controller, cancelling pending album art request")
-            pendingAlbumArtRequests.remove(request.deviceAddress)
-            bleServerManager.sendNoAlbumArtAvailable(
-                request.deviceAddress,
-                request.trackId,
-                request.checksum,
-                "No media playing"
-            )
-        }
-    }
     
-    private fun checkPendingAlbumArtRequests() {
-        // Called when metadata changes to check if we can fulfill any pending requests
-        if (pendingAlbumArtRequests.isEmpty()) return
-        
-        val metadata = currentMediaController?.metadata ?: return
-        val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
-        val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
-        val currentHash = bleServerManager.albumArtManager.generateMetadataHash(artist, album)
-        
-        // Check each pending request
-        val requestsToRemove = mutableListOf<String>()
-        for ((deviceAddress, request) in pendingAlbumArtRequests) {
-            if (currentHash == request.checksum || request.checksum.isEmpty() || request.checksum == "current") {
-                // This request matches current media
-                val albumArtResult = bleServerManager.albumArtManager.extractAlbumArt(metadata)
-                if (albumArtResult != null) {
-                    val (artData, sha256Checksum) = albumArtResult
-                    Log.d(TAG, "Proactively sending album art to $deviceAddress after metadata change")
-                    
-                    // Send the album art
-                    bleServerManager.sendAlbumArtToDevice(deviceAddress, artData, sha256Checksum, request.trackId)
-                    requestsToRemove.add(deviceAddress)
-                }
-            } else {
-                // This request no longer matches, remove it
-                Log.d(TAG, "Removing stale album art request for $deviceAddress (track changed)")
-                bleServerManager.sendNoAlbumArtAvailable(
-                    deviceAddress,
-                    request.trackId,
-                    request.checksum,
-                    "Track changed"
-                )
-                requestsToRemove.add(deviceAddress)
-            }
-        }
-        
-        // Remove fulfilled or stale requests
-        requestsToRemove.forEach { pendingAlbumArtRequests.remove(it) }
-    }
-    
-    private fun cleanupPendingRequests() {
-        // Remove old pending requests (older than 5 seconds)
-        val now = System.currentTimeMillis()
-        val timeout = 5000L // 5 seconds
-        
-        val requestsToRemove = pendingAlbumArtRequests.filter { (_, request) ->
-            now - request.timestamp > timeout
-        }.keys
-        
-        requestsToRemove.forEach { deviceAddress ->
-            Log.d(TAG, "Removing timed out album art request for $deviceAddress")
-            pendingAlbumArtRequests.remove(deviceAddress)
-        }
-    }
 
     private fun updateNotification(message: String) {
         val notification = createNotification(message)
@@ -2027,7 +1886,7 @@ class NocturneServiceBLE : Service() {
             return
         }
         
-        val albumArtResult = bleServerManager.albumArtManager.extractAlbumArt(metadata)
+        val albumArtResult = bleServerManager.mediaStoreAlbumArtManager.getAlbumArt(metadata)
         if (albumArtResult == null) {
             Log.w(TAG, "BLE_LOG: No album art available for test")
             return
@@ -2102,13 +1961,67 @@ class NocturneServiceBLE : Service() {
         }
     }
     
-    private fun handleAlbumArtQuery(command: Command) {
-        val payload = command.payload ?: return
-        val deviceAddress = payload["device_address"] as? String ?: return
-        val trackId = payload["track_id"] as? String ?: ""
-        val checksum = payload["checksum"] as? String ?: ""
+    /**
+     * Handle album art query from nocturned
+     */
+    private fun handleAlbumArtQuery(deviceAddress: String, requestedHash: String) {
+        Log.d(TAG, "BLE_LOG: Handling album art query for hash: $requestedHash, device: $deviceAddress")
         
-        handleAlbumArtQuery(deviceAddress, trackId, checksum)
+        // Add a 250ms delay to allow album art to be fully loaded
+        serviceScope.launch {
+            delay(250)
+            
+            // Try to get current album art from the media controller
+            val metadata = currentMediaController?.metadata
+            if (metadata == null) {
+                Log.w(TAG, "BLE_LOG: No media metadata available for album art query")
+                return@launch
+            }
+            
+            // First, try to get album art from the media tab bitmap (most reliable source)
+            val mediaTabBitmap = com.paulcity.nocturnecompanion.ui.MediaTabBitmapHolder.getBitmap()
+            val albumArtResult = if (mediaTabBitmap != null) {
+                val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
+                val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+                
+                Log.d(TAG, "BLE_LOG: Using media tab bitmap for album art query")
+                
+                // Process the media tab bitmap directly
+                val processedArt = processMediaTabBitmap(mediaTabBitmap, artist, album)
+                if (processedArt != null) {
+                    // Convert to expected format (ByteArray, String)
+                    Pair(processedArt.data, processedArt.checksum)
+                } else {
+                    null
+                }
+            } else {
+                // Fallback to MediaStore album art manager
+                Log.d(TAG, "BLE_LOG: No media tab bitmap available, using MediaStore fallback")
+                bleServerManager.mediaStoreAlbumArtManager.getAlbumArt(metadata)
+            }
+            
+            if (albumArtResult == null) {
+                Log.w(TAG, "BLE_LOG: No album art available for query from any source")
+                return@launch
+            }
+            
+            val (artData, sha256Checksum) = albumArtResult
+            Log.d(TAG, "BLE_LOG: Album art extracted for query: ${artData.size} bytes, SHA256: $sha256Checksum")
+            
+            // Get the device object
+            val bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
+            val device = bluetoothAdapter?.getRemoteDevice(deviceAddress)
+            if (device == null) {
+                Log.e(TAG, "BLE_LOG: Device not found for album art query: $deviceAddress")
+                return@launch
+            }
+            
+            // Send album art using binary protocol
+            val trackId = "$requestedHash" // Use the requested hash as track ID
+            bleServerManager.sendAlbumArt(artData, sha256Checksum, trackId)
+            
+            Log.d(TAG, "BLE_LOG: Album art query response sent via binary protocol")
+        }
     }
     
     private fun handle2MPhyRequest(command: Command) {
@@ -2131,5 +2044,193 @@ class NocturneServiceBLE : Service() {
         bleServerManager.sendCustomData(responseData)
         
         Log.d(TAG, "BLE_LOG: 2M PHY request ${if (success) "initiated" else "failed"}")
+    }
+    
+    /**
+     * Calculate album hash using the same algorithm as nocturned backend
+     * This matches the algorithm in BinaryProtocolV2.kt
+     */
+    private fun calculateAlbumHash(album: String, artist: String): Int {
+        val combined = "$album|$artist"
+        return combined.hashCode()
+    }
+    
+    /**
+     * Trigger album art extraction when we know it's available in the media tab
+     */
+    private fun triggerAlbumArtFromBitmap(artist: String, album: String, title: String, bitmapData: ByteArray) {
+        Log.d(TAG, "🎨🎨🎨 triggerAlbumArtFromBitmap called!")
+        Log.d(TAG, "🎨 Processing album art from Media tab bitmap for: $artist - $album - $title, size: ${bitmapData.size} bytes")
+        
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                // Decode the bitmap from the Media tab
+                val bitmap = android.graphics.BitmapFactory.decodeByteArray(bitmapData, 0, bitmapData.size)
+                if (bitmap != null) {
+                    Log.d(TAG, "Successfully decoded bitmap from Media tab: ${bitmap.width}x${bitmap.height}")
+                    
+                    // Process the bitmap the same way AlbumArtManager would
+                    val processedArt = processMediaTabBitmap(bitmap, artist, album)
+                    if (processedArt != null) {
+                        Log.d(TAG, "Successfully processed Media tab album art: ${processedArt.data.size} bytes, hash: ${processedArt.checksum}")
+                        
+                        // Send to all connected devices via the callback mechanism
+                        bleServerManager.albumArtManager.setOnAlbumArtCachedCallback { cachedArt, artistCallback, albumCallback ->
+                            val trackId = "$artistCallback|$albumCallback"
+                            bleServerManager.sendAlbumArt(cachedArt.data, cachedArt.checksum, trackId)
+                        }
+                        
+                        // Cache the processed art and trigger the callback
+                        bleServerManager.albumArtManager.cacheAlbumArt(artist, album, processedArt.data, processedArt.checksum)
+                    } else {
+                        Log.e(TAG, "Failed to process Media tab bitmap")
+                    }
+                } else {
+                    Log.e(TAG, "Failed to decode bitmap from Media tab data")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error processing album art from Media tab bitmap", e)
+            }
+        }
+    }
+    
+    private fun processMediaTabBitmap(bitmap: android.graphics.Bitmap, artist: String, album: String): com.paulcity.nocturnecompanion.ble.AlbumArtManager.CachedAlbumArt? {
+        return try {
+            // Create square 300x300 bitmap (same as AlbumArtManager)
+            val targetSize = 300
+            val squareBitmap = createSquareBitmap(bitmap, targetSize)
+            
+            // Compress using WebP format with low quality for smaller file size (same as MediaStoreAlbumArtManager)
+            val outputStream = java.io.ByteArrayOutputStream()
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                squareBitmap.compress(android.graphics.Bitmap.CompressFormat.WEBP_LOSSY, 35, outputStream)
+            } else {
+                @Suppress("DEPRECATION")
+                squareBitmap.compress(android.graphics.Bitmap.CompressFormat.WEBP, 35, outputStream)
+            }
+            val imageData = outputStream.toByteArray()
+            
+            // Calculate SHA-256 checksum from the actual image data
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            val digest = md.digest(imageData)
+            val checksum = digest.joinToString("") { "%02x".format(it) }
+            
+            Log.d(TAG, "Processed Media tab bitmap: ${imageData.size} bytes (WebP), SHA256: $checksum")
+            
+            // Clean up
+            squareBitmap.recycle()
+            
+            com.paulcity.nocturnecompanion.ble.AlbumArtManager.CachedAlbumArt(
+                imageData, 
+                checksum, 
+                com.paulcity.nocturnecompanion.ble.AlbumArtStatus.AVAILABLE
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing Media tab bitmap", e)
+            null
+        }
+    }
+    
+    private fun createSquareBitmap(bitmap: android.graphics.Bitmap, targetSize: Int): android.graphics.Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        val minDim = kotlin.math.min(width, height)
+        
+        // Calculate crop coordinates to center the square
+        val x = (width - minDim) / 2
+        val y = (height - minDim) / 2
+        
+        // Create square crop
+        val squareBitmap = android.graphics.Bitmap.createBitmap(bitmap, x, y, minDim, minDim)
+        
+        // Scale to target size
+        return android.graphics.Bitmap.createScaledBitmap(squareBitmap, targetSize, targetSize, true)
+    }
+    
+    private fun triggerAlbumArtExtraction(artist: String, album: String, title: String) {
+        Log.d(TAG, "DEPRECATED: triggerAlbumArtExtraction called - should use triggerAlbumArtFromBitmap instead")
+        Log.d(TAG, "Triggering album art extraction for: $artist - $album - $title")
+        
+        // Try to get the current media controller and metadata
+        val controller = currentMediaController
+        if (controller != null) {
+            val metadata = controller.metadata
+            if (metadata != null) {
+                Log.d(TAG, "Found current media metadata, extracting album art")
+                serviceScope.launch(Dispatchers.IO) {
+                    try {
+                        val albumArtResult = bleServerManager.albumArtManager.extractAlbumArt(metadata)
+                        if (albumArtResult != null) {
+                            Log.d(TAG, "Successfully extracted album art from metadata: ${albumArtResult.data.size} bytes, checksum: ${albumArtResult.checksum}")
+                            // The callback mechanism will automatically send it to all connected devices
+                        } else {
+                            Log.w(TAG, "Album art extraction from metadata failed even though media tab has it loaded")
+                            
+                            // If metadata extraction fails, try to create a synthetic metadata object
+                            // This is a fallback when the MediaController metadata doesn't have bitmap data
+                            // but the media tab successfully loaded it via other means
+                            Log.d(TAG, "Attempting fallback album art extraction using media tab success indicator")
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error during triggered album art extraction", e)
+                    }
+                }
+            } else {
+                Log.w(TAG, "No metadata available in current media controller")
+            }
+        } else {
+            Log.w(TAG, "No current media controller available for album art extraction")
+        }
+    }
+    
+    /**
+     * Send album art for the current track to a newly connected device
+     */
+    private fun sendCurrentTrackAlbumArt(deviceAddress: String) {
+        val metadata = currentMediaController?.metadata
+        if (metadata != null) {
+            val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
+            val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+            
+            // Check if we have album art cached for current track
+            val (status, cachedArt) = bleServerManager.albumArtManager.getArtWithStatus(artist, album)
+            
+            if (status == AlbumArtStatus.AVAILABLE && cachedArt != null) {
+                val trackId = "$artist|$album"
+                Log.d(TAG, "Sending cached album art to new device: ${cachedArt.data.size} bytes for $trackId")
+                
+                // Send album art to the specific device
+                serviceScope.launch(Dispatchers.IO) {
+                    try {
+                        bleServerManager.sendAlbumArtToDevice(deviceAddress, cachedArt.data, cachedArt.checksum, trackId)
+                        Log.d(TAG, "Successfully sent current track album art to new device: $deviceAddress")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error sending current track album art to new device", e)
+                    }
+                }
+            } else {
+                Log.d(TAG, "No cached album art available for current track ($artist - $album), status: $status")
+                
+                // If no album art is cached, try to extract it
+                if (status == AlbumArtStatus.NOT_REQUESTED) {
+                    Log.d(TAG, "Attempting to extract album art for current track")
+                    serviceScope.launch(Dispatchers.IO) {
+                        try {
+                            val albumArtResult = bleServerManager.albumArtManager.extractAlbumArt(metadata)
+                            if (albumArtResult != null) {
+                                Log.d(TAG, "Extracted album art for current track: ${albumArtResult.data.size} bytes")
+                                // The callback will automatically send it to all connected devices
+                            } else {
+                                Log.d(TAG, "No album art available to extract for current track")
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error extracting album art for current track", e)
+                        }
+                    }
+                }
+            }
+        } else {
+            Log.d(TAG, "No current media metadata available for album art")
+        }
     }
 }

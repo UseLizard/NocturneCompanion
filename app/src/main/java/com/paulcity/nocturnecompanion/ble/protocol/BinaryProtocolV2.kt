@@ -58,6 +58,8 @@ object BinaryProtocolV2 {
     const val MSG_ALBUM_ART_CHUNK: Short = 0x0302
     const val MSG_ALBUM_ART_END: Short = 0x0303
     const val MSG_ALBUM_ART_NOT_AVAILABLE: Short = 0x0304
+    const val MSG_ALBUM_ART_AVAILABLE_QUERY: Short = 0x0305  // Ask if art is needed
+    const val MSG_ALBUM_ART_NEEDED_RESPONSE: Short = 0x0306  // Response: y/n
     
     // Test album art messages
     const val MSG_TEST_ALBUM_ART_START: Short = 0x0310
@@ -233,6 +235,15 @@ object BinaryProtocolV2 {
     }
     
     /**
+     * Simple hash function for album info (album+artist)
+     * Using a basic string hash for fast computation
+     */
+    private fun calculateAlbumHash(album: String, artist: String): Int {
+        val combined = "$album|$artist"
+        return combined.hashCode()
+    }
+
+    /**
      * Full state update payload
      */
     fun createFullStatePayload(
@@ -248,7 +259,10 @@ object BinaryProtocolV2 {
         val albumBytes = album.toByteArray(Charsets.UTF_8)
         val trackBytes = track.toByteArray(Charsets.UTF_8)
         
-        val totalSize = 1 + 8 + 8 + 1 + 2 + artistBytes.size + 2 + albumBytes.size + 2 + trackBytes.size
+        // Calculate album hash
+        val albumHash = calculateAlbumHash(album, artist)
+        
+        val totalSize = 1 + 8 + 8 + 1 + 4 + 2 + artistBytes.size + 2 + albumBytes.size + 2 + trackBytes.size
         
         return ByteBuffer.allocate(totalSize).apply {
             order(ByteOrder.BIG_ENDIAN)
@@ -264,6 +278,9 @@ object BinaryProtocolV2 {
             // Volume (1 byte)
             put(volumePercent.toByte())
             
+            // Album hash (4 bytes)
+            putInt(albumHash)
+            
             // Strings with length prefixes
             putShort(artistBytes.size.toShort())
             put(artistBytes)
@@ -275,7 +292,7 @@ object BinaryProtocolV2 {
     }
     
     fun parseFullStatePayload(data: ByteArray): StateData? {
-        if (data.size < 20) return null // Minimum size check
+        if (data.size < 24) return null // Minimum size check (updated for hash)
         
         val buffer = ByteBuffer.wrap(data).apply {
             order(ByteOrder.BIG_ENDIAN)
@@ -287,6 +304,9 @@ object BinaryProtocolV2 {
         val durationMs = buffer.getLong()
         val positionMs = buffer.getLong()
         val volumePercent = buffer.get().toInt() and 0xFF
+        
+        // Read album hash
+        val albumHash = buffer.getInt()
         
         // Read strings
         val artistLen = buffer.getShort().toInt()
@@ -304,7 +324,7 @@ object BinaryProtocolV2 {
         buffer.get(trackBytes)
         val track = String(trackBytes, Charsets.UTF_8)
         
-        return StateData(artist, album, track, durationMs, positionMs, isPlaying, volumePercent)
+        return StateData(artist, album, track, durationMs, positionMs, isPlaying, volumePercent, albumHash)
     }
     
     /**
@@ -407,6 +427,80 @@ object BinaryProtocolV2 {
     }
     
     /**
+     * Album art availability query payload
+     * Format: [checksum_length:1][checksum:N][track_id_length:2][track_id:M][compressed_size:4][flags:1]
+     */
+    fun createAlbumArtAvailabilityQueryPayload(
+        checksum: String,
+        trackId: String,
+        compressedSize: Int,
+        isGzipCompressed: Boolean
+    ): ByteArray {
+        val checksumBytes = checksum.toByteArray(Charsets.UTF_8)
+        val trackIdBytes = trackId.toByteArray(Charsets.UTF_8)
+        
+        return ByteBuffer.allocate(1 + checksumBytes.size + 2 + trackIdBytes.size + 4 + 1).apply {
+            order(ByteOrder.BIG_ENDIAN)
+            put(checksumBytes.size.toByte())
+            put(checksumBytes)
+            putShort(trackIdBytes.size.toShort())
+            put(trackIdBytes)
+            putInt(compressedSize)
+            put(if (isGzipCompressed) 0x01.toByte() else 0x00.toByte())
+        }.array()
+    }
+    
+    /**
+     * Parse album art availability query payload
+     */
+    fun parseAlbumArtAvailabilityQueryPayload(data: ByteArray): Triple<String, String, Pair<Int, Boolean>>? {
+        if (data.size < 8) return null // Minimum size check
+        
+        val buffer = ByteBuffer.wrap(data).apply {
+            order(ByteOrder.BIG_ENDIAN)
+        }
+        
+        // Read checksum
+        val checksumLength = buffer.get().toInt() and 0xFF
+        val checksumBytes = ByteArray(checksumLength)
+        buffer.get(checksumBytes)
+        val checksum = String(checksumBytes, Charsets.UTF_8)
+        
+        // Read track ID
+        val trackIdLength = buffer.getShort().toInt()
+        val trackIdBytes = ByteArray(trackIdLength)
+        buffer.get(trackIdBytes)
+        val trackId = String(trackIdBytes, Charsets.UTF_8)
+        
+        // Read compression info
+        val compressedSize = buffer.getInt()
+        val flags = buffer.get()
+        val isGzipCompressed = (flags.toInt() and 0x01) != 0
+        
+        return Triple(checksum, trackId, Pair(compressedSize, isGzipCompressed))
+    }
+    
+    /**
+     * Album art needed response payload (simple y/n)
+     */
+    fun createAlbumArtNeededResponsePayload(needed: Boolean): ByteArray {
+        return byteArrayOf(if (needed) 'y'.code.toByte() else 'n'.code.toByte())
+    }
+    
+    /**
+     * Parse album art needed response payload
+     */
+    fun parseAlbumArtNeededResponsePayload(data: ByteArray): Boolean? {
+        if (data.isEmpty()) return null
+        val response = data[0].toInt().toChar()
+        return when (response) {
+            'y', 'Y' -> true
+            'n', 'N' -> false
+            else -> null
+        }
+    }
+    
+    /**
      * Error payload
      */
     fun createErrorPayload(code: String, message: String): ByteArray {
@@ -504,17 +598,21 @@ object BinaryProtocolV2 {
     // Album art payload structures (using existing BinaryProtocol)
     
     /**
-     * Album art start message payload structure:
+     * Album art start message payload structure (with compression support):
      * [0-31]  SHA256 checksum (32 bytes)
      * [32-35] Total chunks (uint32)
-     * [36-39] Image size (uint32)
-     * [40+]   Track ID (UTF-8 string)
+     * [36-39] Original image size (uint32)
+     * [40-43] Compressed size (uint32) - 0 if not compressed
+     * [44]    Compression flags (1 byte) - bit 0: GZIP compressed
+     * [45+]   Track ID (UTF-8 string)
      */
     data class AlbumArtStartPayload(
         val checksum: ByteArray,  // SHA-256 = 32 bytes
         val totalChunks: Int,
         val imageSize: Int,
-        val trackId: String
+        val trackId: String,
+        val compressedSize: Int = 0,  // 0 if not compressed
+        val isGzipCompressed: Boolean = false
     ) {
         init {
             require(checksum.size == 32) { "Checksum must be 32 bytes (SHA-256)" }
@@ -522,11 +620,13 @@ object BinaryProtocolV2 {
         
         fun toByteArray(): ByteArray {
             val trackIdBytes = trackId.toByteArray(Charsets.UTF_8)
-            val buffer = ByteBuffer.allocate(40 + trackIdBytes.size).apply {
+            val buffer = ByteBuffer.allocate(45 + trackIdBytes.size).apply {
                 order(ByteOrder.BIG_ENDIAN)
                 put(checksum)
                 putInt(totalChunks)
                 putInt(imageSize)
+                putInt(compressedSize)
+                put(if (isGzipCompressed) 0x01.toByte() else 0x00.toByte())
                 put(trackIdBytes)
             }
             return buffer.array()
@@ -534,7 +634,8 @@ object BinaryProtocolV2 {
         
         companion object {
             fun fromByteArray(bytes: ByteArray): AlbumArtStartPayload {
-                require(bytes.size >= 40) { "Invalid payload size" }
+                val minSize = if (bytes.size >= 45) 45 else 40  // Support both old and new format
+                require(bytes.size >= minSize) { "Invalid payload size" }
                 
                 val buffer = ByteBuffer.wrap(bytes).apply {
                     order(ByteOrder.BIG_ENDIAN)
@@ -546,11 +647,22 @@ object BinaryProtocolV2 {
                 val totalChunks = buffer.getInt()
                 val imageSize = buffer.getInt()
                 
-                val trackIdBytes = ByteArray(bytes.size - 40)
+                // Check if this is the new format with compression info
+                val (compressedSize, isGzipCompressed, trackIdOffset) = if (bytes.size >= 45) {
+                    val compSize = buffer.getInt()
+                    val compressionFlags = buffer.get()
+                    val isGzip = (compressionFlags.toInt() and 0x01) != 0
+                    Triple(compSize, isGzip, 45)
+                } else {
+                    // Old format - no compression info
+                    Triple(0, false, 40)
+                }
+                
+                val trackIdBytes = ByteArray(bytes.size - trackIdOffset)
                 buffer.get(trackIdBytes)
                 val trackId = String(trackIdBytes, Charsets.UTF_8)
                 
-                return AlbumArtStartPayload(checksum, totalChunks, imageSize, trackId)
+                return AlbumArtStartPayload(checksum, totalChunks, imageSize, trackId, compressedSize, isGzipCompressed)
             }
         }
     }
@@ -609,7 +721,8 @@ object BinaryProtocolV2 {
         val durationMs: Long,
         val positionMs: Long,
         val isPlaying: Boolean,
-        val volumePercent: Int
+        val volumePercent: Int,
+        val albumHash: Int = 0 // Default for backward compatibility
     )
     
     data class CapabilitiesData(
@@ -697,6 +810,8 @@ object BinaryProtocolV2 {
             MSG_ALBUM_ART_START -> "AlbumArtStart"
             MSG_ALBUM_ART_CHUNK -> "AlbumArtChunk"
             MSG_ALBUM_ART_END -> "AlbumArtEnd"
+            MSG_ALBUM_ART_AVAILABLE_QUERY -> "AlbumArtAvailabilityQuery"
+            MSG_ALBUM_ART_NEEDED_RESPONSE -> "AlbumArtNeededResponse"
             
             // Error messages
             MSG_ERROR -> "Error"
