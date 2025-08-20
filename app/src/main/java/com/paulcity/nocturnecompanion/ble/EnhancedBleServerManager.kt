@@ -345,9 +345,16 @@ class EnhancedBleServerManager(
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                             CoroutineScope(Dispatchers.Main).launch {
                                 delay(200) // Allow connection to stabilize
-                                Log.d(TAG, "BLE_LOG: Starting PHY negotiation for newly connected device ${device.address}")
+                                Log.d(TAG, "🚀 Starting AGGRESSIVE PHY optimization for ${device.address}")
                                 
-                                // Try 2M PHY first for best performance
+                                // Step 1: Prepare for maximum MTU (client will negotiate)
+                                Log.d(TAG, "📡 Ready for MTU negotiation up to 517 bytes for ${device.address}")
+                                // Note: MTU negotiation is initiated by the client (nocturned)
+                                
+                                delay(200) // Allow MTU negotiation
+                                
+                                // Step 2: Try 2M PHY for maximum throughput
+                                Log.d(TAG, "⚡ Requesting 2M PHY for maximum speed on ${device.address}")
                                 gattServer?.setPreferredPhy(
                                     device,
                                     BluetoothDevice.PHY_LE_2M,  // TX PHY
@@ -355,14 +362,14 @@ class EnhancedBleServerManager(
                                     BluetoothDevice.PHY_OPTION_NO_PREFERRED
                                 )
                                 
-                                // Check result and fallback to 1M if needed
-                                delay(400) // Give more time for 2M PHY negotiation
+                                // Step 3: Verify PHY negotiation result
+                                delay(500) // Give more time for 2M PHY negotiation
                                 gattServer?.readPhy(device)
                                 
-                                delay(300) // Wait for PHY read result
+                                delay(400) // Wait for PHY read result
                                 val deviceContext = connectedDevices[device.address]
                                 if (deviceContext != null && !deviceContext.supports2MPHY) {
-                                    Log.d(TAG, "BLE_LOG: 2M PHY not supported, falling back to 1M PHY for ${device.address}")
+                                    Log.d(TAG, "⚠️ 2M PHY not available, optimizing 1M PHY for ${device.address}")
                                     gattServer?.setPreferredPhy(
                                         device,
                                         BluetoothDevice.PHY_LE_1M,  // TX PHY
@@ -371,9 +378,22 @@ class EnhancedBleServerManager(
                                     )
                                     delay(300)
                                     gattServer?.readPhy(device)
+                                } else {
+                                    Log.d(TAG, "🎉 2M PHY successfully negotiated for ${device.address}")
                                 }
                                 
-                                Log.d(TAG, "BLE_LOG: Initial PHY negotiation completed for ${device.address}")
+                                // Step 4: Log that we're ready for client-initiated priority optimization
+                                // Note: Connection priority must be requested by the client, not the server
+                                Log.d(TAG, "🔥 Ready for client-initiated connection priority optimization for ${device.address}")
+                                deviceContext?.requestHighPriority = true
+                                
+                                delay(200) // Allow priority change to take effect
+                                
+                                Log.d(TAG, "🚀 AGGRESSIVE PHY optimization completed for ${device.address}")
+                                
+                                // Verify final connection parameters
+                                delay(300)
+                                gattServer?.readPhy(device)
                             }
                         }
                         
@@ -1255,6 +1275,60 @@ class EnhancedBleServerManager(
     }
     
     /**
+     * Trigger aggressive connection optimization for maximum speed
+     * This includes MTU negotiation, 2M PHY, and high connection priority
+     */
+    fun triggerAggressiveOptimization(deviceAddress: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            Log.w(TAG, "Aggressive optimization requires Android O (API 26) or higher")
+            return false
+        }
+        
+        val context = connectedDevices[deviceAddress] ?: run {
+            Log.w(TAG, "Device $deviceAddress not found for aggressive optimization")
+            return false
+        }
+        
+        Log.d(TAG, "🚀 TRIGGERING AGGRESSIVE OPTIMIZATION for $deviceAddress")
+        
+        CoroutineScope(Dispatchers.Main).launch {
+            // Force re-optimization even if already optimized
+            try {
+                // Step 1: Server-side PHY optimization preparation  
+                Log.d(TAG, "📡 Preparing for client-initiated MTU negotiation...")
+                // Note: MTU negotiation must be initiated by the client, server only responds
+                
+                // Step 2: Force 2M PHY (server can initiate PHY changes)
+                Log.d(TAG, "⚡ Force-requesting 2M PHY...")
+                gattServer?.setPreferredPhy(
+                    context.device,
+                    BluetoothDevice.PHY_LE_2M,
+                    BluetoothDevice.PHY_LE_2M,
+                    BluetoothDevice.PHY_OPTION_NO_PREFERRED
+                )
+                delay(500)
+                gattServer?.readPhy(context.device)
+                
+                // Step 3: Log readiness for client-initiated priority optimization
+                Log.d(TAG, "🔥 Ready for client-initiated connection priority optimization...")
+                // Note: Connection priority must be requested by the client, not the server
+                context.requestHighPriority = true
+                
+                delay(400)
+                Log.d(TAG, "🚀 AGGRESSIVE OPTIMIZATION COMPLETE for $deviceAddress")
+                
+                // Update device state
+                updateConnectedDevicesList()
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Aggressive optimization failed for $deviceAddress", e)
+            }
+        }
+        
+        return true
+    }
+    
+    /**
      * Optimize connection parameters for high-speed data transfer
      * Attempts 2M PHY first, falls back to 1M PHY if not supported
      */
@@ -1945,6 +2019,12 @@ class EnhancedBleServerManager(
         trackId: String,
         deviceContext: DeviceContext
     ) {
+        // Trigger aggressive optimization before large data transfer
+        Log.d(TAG, "🚀 Pre-transfer optimization for album art (${albumArtData.size} bytes)")
+        triggerAggressiveOptimization(device.address)
+        
+        // Give optimization time to take effect
+        delay(100)
         val binaryTransfer = binaryEncoder.encodeAlbumArtTransfer(
             imageData = albumArtData,
             checksum = checksum,

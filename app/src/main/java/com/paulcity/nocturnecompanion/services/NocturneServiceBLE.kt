@@ -1969,7 +1969,7 @@ class NocturneServiceBLE : Service() {
         
         // Add a 250ms delay to allow album art to be fully loaded
         serviceScope.launch {
-            delay(250)
+            delay(50)
             
             // Try to get current album art from the media controller
             val metadata = currentMediaController?.metadata
